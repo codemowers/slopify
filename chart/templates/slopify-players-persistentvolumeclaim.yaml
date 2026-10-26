@@ -1,0 +1,15 @@
+{{- if not .Values.players.existingClaim }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: slopify-players
+  labels:
+    skaffold.dev/keep: "true"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.players.storageClassName | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.players.size | quote }}
+{{- end }}

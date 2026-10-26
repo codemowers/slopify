@@ -1,0 +1,52 @@
+apiVersion: skaffold/v4beta13
+kind: Config
+metadata:
+  name: slopify
+build:
+  tagPolicy:
+    inputDigest: {}
+  local:
+    push: true
+  artifacts:
+    - image: slopify-indexer
+      docker:
+        dockerfile: build/indexer.Dockerfile
+    - image: slopify-catalog
+      docker:
+        dockerfile: build/catalog.Dockerfile
+    - image: slopify-streamer
+      docker:
+        dockerfile: build/streamer.Dockerfile
+    - image: slopify-players
+      docker:
+        dockerfile: build/players.Dockerfile
+    - image: slopify-frontend
+      docker:
+        dockerfile: build/frontend.Dockerfile
+    - image: slopify-transcoder
+      docker:
+        dockerfile: build/transcoder.Dockerfile
+manifests:
+  helm:
+    flags:
+      template:
+        # Local Helm rendering doesn't discover CRDs.
+        - --api-versions=monitoring.coreos.com/v1/PodMonitor
+    releases:
+      - name: slopify
+        chartPath: chart
+        valuesFiles:
+          - chart/values-local.yaml
+        setValueTemplates:
+          images.indexer: "{{.IMAGE_FULLY_QUALIFIED_slopify_indexer}}"
+          images.catalog: "{{.IMAGE_FULLY_QUALIFIED_slopify_catalog}}"
+          images.streamer: "{{.IMAGE_FULLY_QUALIFIED_slopify_streamer}}"
+          images.players: "{{.IMAGE_FULLY_QUALIFIED_slopify_players}}"
+          images.transcoder: "{{.IMAGE_FULLY_QUALIFIED_slopify_transcoder}}"
+          images.frontend: "{{.IMAGE_FULLY_QUALIFIED_slopify_frontend}}"
+deploy:
+  # Context and namespace come from the local, gitignored skaffold.env.
+  kubectl:
+    flags:
+      delete:
+        - --selector=skaffold.dev/keep!=true

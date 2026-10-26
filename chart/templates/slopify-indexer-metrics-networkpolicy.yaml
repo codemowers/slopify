@@ -1,0 +1,22 @@
+{{- if and .Values.networkPolicy.enabled .Values.indexer.metrics.podMonitor.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: slopify-indexer-metrics
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: slopify
+      app.kubernetes.io/component: indexer
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            {{- required "indexer metrics requires a scrapeNamespaceSelector with network policy" .Values.indexer.metrics.scrapeNamespaceSelector | toYaml | nindent 12 }}
+          podSelector:
+            {{- required "indexer metrics requires a scrapePodSelector with network policy" .Values.indexer.metrics.scrapePodSelector | toYaml | nindent 12 }}
+      ports:
+        - protocol: TCP
+          port: metrics
+{{- end }}

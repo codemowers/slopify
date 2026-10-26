@@ -1,0 +1,23 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: slopify
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.domain }}
+      http:
+        paths:
+          {{- range $path, $service := dict "/api/catalog" "catalog" "/api/players" "players" "/api/stream" "players" "/device" "players" "/output-api" "players" "/stream/original" "streamer" "/stream/opus-128" "opus-128" "/stream/mp3-192" "mp3-192" "/stream/video-aac-192" "video-aac-192" "/stream/video-copy" "video-aac-192" "/" "frontend" }}
+          - path: {{ $path }}
+            pathType: Prefix
+            backend:
+              service:
+                name: slopify-{{ $service }}
+                port:
+                  name: http
+          {{- end }}
+{{- end }}

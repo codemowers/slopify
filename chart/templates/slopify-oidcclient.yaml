@@ -1,0 +1,30 @@
+apiVersion: codemowers.cloud/v1
+kind: OIDCClient
+metadata:
+  name: slopify
+spec:
+  displayName: Slopify
+  applicationType: web
+  uri: https://{{ .Values.domain }}/
+  redirectUris:
+    - https://{{ .Values.domain }}/auth/callback
+  grantTypes:
+    - authorization_code
+    - refresh_token
+  responseTypes:
+    - code
+  availableScopes:
+    - openid
+    - profile
+    - email
+    - offline_access
+    - slopify:library:read
+    - slopify:players:read
+    - slopify:players:write
+    - slopify:stream
+  pkce: true
+  tokenEndpointAuthMethod: client_secret_basic
+  allowedResources:
+    - https://{{ .Values.domain }}/api
+  allowedUsers:
+    {{- required "Set allowedUsers in your private Helm values file" .Values.allowedUsers | toYaml | nindent 4 }}

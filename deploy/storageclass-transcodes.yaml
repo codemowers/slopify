@@ -1,0 +1,13 @@
+# Cluster-owned disposable cache storage, provisioned separately from the app.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: transcodes
+  annotations:
+    kubernetes.io/description: Disposable Slopify transcode caches on node-local TopoLVM volumes.
+provisioner: topolvm.io
+parameters:
+  fsType: xfs
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true

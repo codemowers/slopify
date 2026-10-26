@@ -1,0 +1,6 @@
+apiVersion: v2
+name: slopify
+description: Music and video server with HTTPS device players
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

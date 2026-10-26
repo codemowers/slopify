@@ -1,0 +1,26 @@
+# Copy to values-local.yaml and customize locally; that file is gitignored.
+# Configure exact identity-provider destinations under networkPolicy.oidcEgress.
+domain: slopify.example.com
+allowedUsers:
+- your-account-id
+ingress:
+  className: traefik
+networkPolicy:
+  enabled: true
+  oidcEgress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: traefik
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: traefik
+    ports:
+    - protocol: TCP
+      port: 30443
+media:
+  hostPath: /path/to/media
+players:
+  storageClassName: your-state-storage-class
+transcodes:
+  storageClassName: your-cache-storage-class

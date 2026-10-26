@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#090909">
+  <title>Slopify</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icon.svg">
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header>
+    <button id="menu-toggle" class="menu-toggle" aria-label="Open menu and settings" aria-expanded="false" aria-controls="settings-panel">☰</button>
+    <span class="brand">Slopify</span>
+    <span class="header-caption">Your collection. Everywhere.</span>
+    <span class="spacer"></span>
+    <button id="library-toggle" class="library-toggle" aria-label="Browse library" aria-controls="library" aria-expanded="false">Library</button>
+    <button id="device-target" class="device-target" aria-label="Choose playback device"><span class="eyebrow">PLAYING ON</span><strong id="connected-output">Connecting…</strong></button>
+  </header>
+
+  <div id="reconnect-status" role="status" hidden>Reconnecting to Slopify…</div>
+  <div id="blocked" hidden>This browser was asked to play. <button id="unblock">Allow audio here</button></div>
+
+  <button id="menu-backdrop" class="menu-backdrop" aria-label="Close menu" hidden></button>
+  <aside id="settings-panel" class="settings-panel" aria-label="Menu and settings" hidden>
+    <div class="section-heading"><strong>Slopify</strong><button id="menu-close" aria-label="Close menu">✕</button></div>
+    <section class="device-settings" aria-label="Playback devices">
+      <h2>Playback devices</h2><p>Play this queue on any selected outputs.</p>
+      <div id="devices"></div>
+      <form id="create-output-link" class="output-link-form">
+        <label for="output-link-name">New browser output</label>
+        <div class="output-link-actions">
+          <input id="output-link-name" name="name" maxlength="64" placeholder="Kitchen screen" required autocomplete="off">
+          <button type="submit">Create link</button>
+        </div>
+      </form>
+      <div id="output-link-result" hidden>
+        <label for="output-link-url">Private playback link</label>
+        <div class="output-link-actions">
+          <input id="output-link-url" type="text" readonly aria-label="Private playback link">
+          <button id="copy-output-link" type="button">Copy</button>
+        </div>
+        <p>Select this web sink above. Open the link in any receiving browser and enable playback if prompted. No sign-in or queue controls. Anyone with the link can tune in.</p>
+      </div>
+      <p class="muted">Devices play video audio only. Browser outputs show the picture.</p>
+    </section>
+    <section class="stream-settings">
+      <h2>Browser quality</h2>
+      <label id="quality-label">Stream format
+        <select id="quality"><option value="original">Original</option><option value="opus">Opus 128 kbps</option><option value="mp3">MP3 192 kbps</option></select>
+      </label>
+      <p>Applies to this browser. Devices always fetch originals.</p>
+    </section>
+    <section class="appearance">
+      <span class="eyebrow">SETTINGS</span><h2>Appearance</h2>
+      <div class="theme-options" role="group" aria-label="Color theme">
+        <button data-theme-choice="system">System</button>
+        <button data-theme-choice="light">Light</button>
+        <button data-theme-choice="dark">Dark</button>
+      </div>
+      <label class="nerd-setting"><input id="nerd-toggle" type="checkbox"> Nerd mode <span>Playback, buffer and stream details</span></label>
+      <p>Your queue follows your account across devices.</p>
+    </section>
+    <form method="post" action="/auth/logout" class="user">
+      <span id="user"></span>
+      <button type="submit">Sign out</button>
+    </form>
+  </aside>
+  <div class="panes">
+    <aside id="library">
+      <nav class="tabs">
+        <button data-tab="artists" class="active">Collection</button>
+        <button data-tab="folders">Folders</button>
+        <button data-tab="videos">Videos</button>
+      </nav>
+      <input id="filter" type="search" placeholder="Search everything…" autocomplete="off">
+      <section id="folder-navigation" hidden>
+        <nav id="folder-breadcrumbs" aria-label="Folder path"></nav>
+        <button id="queue-folder" title="Include subfolders; maximum 300 tracks">Add folder</button>
+        <span class="folder-limit">Includes subfolders · up to 300 tracks</span>
+      </section>
+      <div class="actions">
+        <button id="add" disabled>Add to queue</button>
+        <button id="add-next" disabled>Play next</button>
+        <button id="replace" disabled>Play now</button>
+      </div>
+      <ul id="tree" class="tree" tabindex="0"></ul>
+      <div id="desktop-video-slot">
+        <div id="video-dock" hidden>
+          <video id="video" playsinline preload="metadata" tabindex="0" role="button" aria-label="Watch video fullscreen" title="Watch fullscreen"></video>
+        </div>
+      </div>
+    </aside>
+
+    <main id="playlist-pane">
+      <div class="queue-heading">
+        <div class="queue-title-line">
+          <h1 id="hero-title">Nothing playing</h1>
+          <div class="queue-actions">
+            <button data-playlist="m3u" title="Download this queue as original file URLs">.m3u</button>
+            <button data-playlist="pls" title="Download this queue as original file URLs">.pls</button>
+            <button id="clear" title="Remove queued items; keep the current item playing">Clear queue</button>
+          </div>
+        </div>
+        <p id="hero-artist">Find something you love in your library.</p>
+      </div>
+      <div class="table-wrap">
+        <table id="playlist">
+          <thead><tr><th class="c-num" scope="col">#</th><th>Title</th><th>Artist</th><th>Album</th><th class="c-len">Length</th><th class="c-actions"><span class="sr-only">Actions</span></th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div id="pl-empty" class="empty">Nothing queued. Use “Add to queue” in your library. Clearing the queue keeps the current item playing.</div>
+      </div>
+      <div class="status" id="status"></div>
+      <div id="mobile-video-slot"></div>
+      <section class="player-deck" aria-label="Playback controls">
+        <div class="transport">
+          <button id="prev" aria-label="Previous" title="Previous (Z)">⏮</button>
+          <button id="play" aria-label="Play" title="Play/pause (Space)">▶</button>
+          <button id="stop" aria-label="Stop" title="Stop (V)">⏹</button>
+          <button id="next" aria-label="Next" title="Next (B)">⏭</button>
+        </div>
+        <div class="now">
+          <div id="now-title">Nothing playing</div>
+          <div class="seek">
+            <span id="pos">0:00</span>
+            <input id="seek" type="range" min="0" max="0" step="1" value="0" aria-label="Seek">
+            <span id="dur">0:00</span>
+          </div>
+        </div>
+      </section>
+    </main>
+      <section id="nerd-panel" class="nerd-panel" aria-label="Playback diagnostics" hidden>
+        <div class="section-heading"><strong>Playback diagnostics</strong><button id="nerd-close">Hide</button></div>
+        <dl id="nerd-info"></dl>
+        <ol id="nerd-events" aria-label="Recent browser playback events"></ol>
+      </section>
+
+  </div>
+
+  <div id="toast" hidden></div>
+  <audio id="audio" preload="auto"></audio>
+</body>
+</html>

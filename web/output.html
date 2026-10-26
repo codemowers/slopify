@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Slopify output</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/output.js"></script>
+</head>
+<body class="output-page">
+  <header><span class="brand">Slopify</span><span class="spacer"></span><span>Read-only output</span></header>
+  <main class="output-view">
+    <p id="connection" role="status">Connecting…</p>
+    <h1 id="output-name">Browser output</h1>
+    <h2 id="track-title">Nothing playing</h2>
+    <p id="track-artist" class="muted"></p>
+    <video id="output-video" playsinline preload="metadata" hidden tabindex="0" role="button" aria-label="Watch fullscreen" title="Watch fullscreen"></video>
+    <audio id="output-audio" preload="auto"></audio>
+    <button id="enable-output" hidden>Enable playback in this browser</button>
+    <p id="output-position" class="muted"></p>
+    <p class="muted">Playback and queue changes are controlled from the signed-in Slopify app.</p>
+    <h2>Queue</h2>
+    <ol id="output-queue"></ol>
+  </main>
+</body>
+</html>

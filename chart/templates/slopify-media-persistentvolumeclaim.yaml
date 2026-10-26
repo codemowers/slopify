@@ -1,0 +1,15 @@
+{{- if and (not .Values.media.existingClaim) (not .Values.media.hostPath) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: slopify-media
+  labels:
+    skaffold.dev/keep: "true"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.media.storageClassName | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.media.size | quote }}
+{{- end }}

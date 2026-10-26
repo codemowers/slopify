@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: slopify-frontend
+  labels: &labels
+    app.kubernetes.io/name: slopify
+    app.kubernetes.io/component: frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels: *labels
+  template:
+    metadata:
+      labels: *labels
+    spec:
+      {{- with .Values.imagePullSecret }}
+      imagePullSecrets:
+        - name: {{ . | quote }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+      containers:
+        - name: frontend
+          image: "{{ if .Values.imageRepository }}{{ .Values.imageRepository }}/{{ end }}{{ .Values.images.frontend }}"
+          env:
+            - name: OIDC_ISSUER
+              valueFrom:
+                secretKeyRef:
+                  name: oidc-client-slopify-owner-secrets
+                  key: OIDC_IDP_URI
+            - name: OIDC_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: oidc-client-slopify-owner-secrets
+                  key: OIDC_CLIENT_ID
+            - name: OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: oidc-client-slopify-owner-secrets
+                  key: OIDC_CLIENT_SECRET
+            - name: OIDC_REDIRECT_URI
+              valueFrom:
+                secretKeyRef:
+                  name: oidc-client-slopify-owner-secrets
+                  key: OIDC_REDIRECT_URIS
+            - name: SESSION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: slopify-keys
+                  key: session-key
+            - name: OIDC_CLIENT_ORIGIN
+              valueFrom:
+                secretKeyRef:
+                  name: oidc-client-slopify-owner-secrets
+                  key: OIDC_CLIENT_ORIGIN
+            - name: OIDC_AUDIENCE
+              value: "$(OIDC_CLIENT_ORIGIN)/api"
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: "1"
+              memory: 128Mi
+          securityContext:
+            readOnlyRootFilesystem: true

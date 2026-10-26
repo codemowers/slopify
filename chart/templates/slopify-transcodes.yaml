@@ -1,0 +1,113 @@
+{{- $allocated := int64 0 -}}
+{{- range .Values.transcodes.profiles -}}
+{{- $allocated = add $allocated (int64 .maxBytes) -}}
+{{- end -}}
+{{- if gt $allocated (int64 .Values.transcodes.maxBytes) -}}
+{{- fail "Transcode profile cache budgets exceed transcodes.maxBytes" -}}
+{{- end -}}
+{{- range $name, $profile := .Values.transcodes.profiles }}
+{{- if gt (int64 $profile.maxBytes) 0 }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: slopify-{{ $name }}-cache
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with $.Values.transcodes.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $profile.size | quote }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: slopify-{{ $name }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: slopify
+      app.kubernetes.io/component: transcoder
+      slopify/profile: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: slopify
+        app.kubernetes.io/component: transcoder
+        slopify/profile: {{ $name }}
+    spec:
+      {{- with $.Values.imagePullSecret }}
+      imagePullSecrets:
+        - name: {{ . | quote }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: transcoder
+          image: "{{ if $.Values.imageRepository }}{{ $.Values.imageRepository }}/{{ end }}{{ $.Values.images.transcoder }}"
+          env:
+            - name: TRANSCODE_PROFILE
+              value: {{ $name | quote }}
+            - name: TRANSCODE_CACHE_ROOT
+              value: /cache
+            - name: TRANSCODE_CACHE_MAX_BYTES
+              value: {{ $profile.maxBytes | int64 | quote }}
+            - name: TRANSCODE_CONCURRENCY
+              value: {{ $.Values.transcodes.concurrency | quote }}
+            - name: ORIGINALS_URL
+              value: http://slopify-streamer
+            - name: STREAM_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: slopify-keys
+                  key: stream-signing-key
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "2"
+              memory: 512Mi
+          securityContext:
+            readOnlyRootFilesystem: true
+          {{- if gt (int64 $profile.maxBytes) 0 }}
+          volumeMounts:
+            - name: cache
+              mountPath: /cache
+      volumes:
+        - name: cache
+          persistentVolumeClaim:
+            claimName: slopify-{{ $name }}-cache
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: slopify-{{ $name }}
+spec:
+  selector:
+    app.kubernetes.io/name: slopify
+    app.kubernetes.io/component: transcoder
+    slopify/profile: {{ $name }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+{{- end }}

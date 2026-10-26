@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: slopify-players
+  labels: &labels
+    app.kubernetes.io/name: slopify
+    app.kubernetes.io/component: players
+spec:
+  replicas: 1
+  # One instance owns the player state and the outputs' event streams.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: *labels
+  template:
+    metadata:
+      labels: *labels
+    spec:
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.imagePullSecret }}
+      imagePullSecrets:
+        - name: {{ . | quote }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: players
+          image: "{{ if .Values.imageRepository }}{{ .Values.imageRepository }}/{{ end }}{{ .Values.images.players }}"
+          env:
+            {{- include "slopify.apiAuthEnv" . | nindent 12 }}
+            - name: PUBLIC_ORIGIN
+              valueFrom:
+                secretKeyRef:
+                  name: oidc-client-slopify-owner-secrets
+                  key: OIDC_CLIENT_ORIGIN
+            - name: STATE_FILE
+              value: /data/players.json
+            - name: STREAM_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: slopify-keys
+                  key: stream-signing-key
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+          securityContext:
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ default "slopify-players" .Values.players.existingClaim | quote }}

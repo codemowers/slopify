@@ -1,0 +1,98 @@
+{{- if .Values.networkPolicy.enabled }}
+# Every component starts with no outbound access, including future components.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: slopify-egress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: slopify
+  policyTypes: [Egress]
+  egress: []
+---
+# Only services that initiate HTTP requests need DNS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: slopify-dns-egress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: slopify
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [catalog, players, frontend, transcoder]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# OIDC discovery, JWKS, code exchange and refresh use configured destinations.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: slopify-oidc-egress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: slopify
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [catalog, players, frontend]
+  policyTypes: [Egress]
+  egress:
+    {{- required "Configure networkPolicy.oidcEgress for your identity provider" .Values.networkPolicy.oidcEgress | toYaml | nindent 4 }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: slopify-catalog-egress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: slopify
+      app.kubernetes.io/component: catalog
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: slopify
+              app.kubernetes.io/component: indexer
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: slopify-transcoder-egress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: slopify
+      app.kubernetes.io/component: transcoder
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: slopify
+              app.kubernetes.io/component: streamer
+      ports:
+        - protocol: TCP
+          port: 8080
+{{- end }}

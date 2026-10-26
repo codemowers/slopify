@@ -1,0 +1,19 @@
+{{- if and .Values.indexer.metrics.podMonitor.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/PodMonitor") }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: slopify-indexer
+  {{- with .Values.indexer.metrics.podMonitor.labels }}
+  labels:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: slopify
+      app.kubernetes.io/component: indexer
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      scheme: http
+{{- end }}

@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: slopify-catalog
+  labels: &labels
+    app.kubernetes.io/name: slopify
+    app.kubernetes.io/component: catalog
+spec:
+  replicas: 1
+  # Pods mount the node-local media volume; replace them rather than overlap.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: *labels
+  template:
+    metadata:
+      labels: *labels
+    spec:
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.imagePullSecret }}
+      imagePullSecrets:
+        - name: {{ . | quote }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+      containers:
+        - name: catalog
+          image: "{{ if .Values.imageRepository }}{{ .Values.imageRepository }}/{{ end }}{{ .Values.images.catalog }}"
+          env:
+            {{- include "slopify.apiAuthEnv" . | nindent 12 }}
+            - name: MEDIA_ROOT
+              value: /media
+            - name: INDEXER_EVENTS_URL
+              value: http://slopify-indexer/v1/events
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+            requests:
+              cpu: 20m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: media
+              mountPath: /media
+              readOnly: true
+      volumes:
+        - name: media
+          {{- if .Values.media.hostPath }}
+          hostPath:
+            path: {{ .Values.media.hostPath | quote }}
+            type: Directory
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ default "slopify-media" .Values.media.existingClaim | quote }}
+          {{- end }}

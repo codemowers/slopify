@@ -1,0 +1,107 @@
+# Seeds the demo library: the free bonus disc of 8BP050 (Blip Festival 2006,
+# 8bitpeoples) from the Wayback Machine, and Big Buck Bunny from Blender.
+# Downloads land in hidden .part files, which the indexer ignores, and are
+# renamed when complete, so the Job can be rerun safely.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: slopify-seed
+data:
+  fetch.sh: |
+    # fetch.sh URL DESTINATION MEMBER: downloads URL to DESTINATION, or
+    # extracts MEMBER from the downloaded zip archive unless MEMBER is "-".
+    set -eu
+    url=$1 dest=$2 member=$3
+    test -s "$dest" && exit 0
+    dir=$(dirname "$dest")
+    mkdir -p "$dir" /media/.seed
+    part="$dir/.$(basename "$dest").part"
+    if test "$member" != -; then
+      zip="/media/.seed/$(basename "$url")"
+      curl -fsSL --retry 5 --retry-all-errors --connect-timeout 30 -C - -o "$zip" "$url"
+      unzip -p "$zip" "$member" > "$part"
+      rm "$zip"
+    else
+      curl -fsSL --retry 5 --retry-all-errors --connect-timeout 30 -C - -o "$part" "$url"
+    fi
+    chmod 0644 "$part"
+    mv "$part" "$dest"
+    echo "fetched $dest"
+  seed.sh: |
+    set -eu
+    apk add --no-cache curl unzip >/dev/null
+    album="/media/8bitpeoples/8BP050 Blip Festival (2006)/cd3"
+    video="/media/Video/Big Buck Bunny (2008)"
+    {
+      while read -r ts url; do
+        printf '%s\0%s\0%s\0' "http://web.archive.org/web/${ts}id_/${url}" "$album/$(basename "$url" | sed 's/%20/ /g')" -
+      done < /seed/8bp050.txt
+      blender=https://download.blender.org
+      printf '%s\0%s\0%s\0' "$blender/peach/bigbuckbunny_movies/BigBuckBunny_640x360.m4v.zip" "$video/Big Buck Bunny 360p.m4v" BigBuckBunny_640x360.m4v
+      printf '%s\0%s\0%s\0' "$blender/demo/movies/BBB/bbb_sunflower_1080p_30fps_normal.mp4.zip" "$video/Big Buck Bunny 1080p.mp4" bbb_sunflower_1080p_30fps_normal.mp4
+    } | xargs -0 -n 3 -P 4 sh /seed/fetch.sh
+    rmdir /media/.seed 2>/dev/null || true
+    echo "library seeded"
+  8bp050.txt: |
+    20070107105743 http://8bp050.8bitpeoples.com:80/cd3/8bp050iii-01-chibi-tech-oniichan_dakara_iiyo.mp3
+    20070211043816 http://8bp050.8bitpeoples.com:80/cd3/8bp050iii-02-c0wp-dub_of%20_death.mp3
+    20070211043757 http://8bp050.8bitpeoples.com:80/cd3/8bp050iii-03-nim-the_transformation_of_travel.mp3
+    20070212000907 http://8bp050.8bitpeoples.com:80/cd3/8bp050iii-04-alex_mauer-mid_air_collision_zaxoff.mp3
+    20070212000825 http://8bp050.8bitpeoples.com:80/cd3/8bp050iii-05-psilodump-hatthylla.mp3
+    20070211101415 http://8bp050.8bitpeoples.com:80/cd3/8bp050iii-06-postal_m@rket-punk_attitude.mp3
+    20070211043911 http://8bp050.8bitpeoples.com:80/cd3/8bp050iii-07-markus_schrodt-colors.mp3
+    20070211043839 http://8bp050.8bitpeoples.com:80/cd3/8bp050iii-08-huoratron-liquid_acieeed.mp3
+    20070211043921 http://8bp050.8bitpeoples.com:80/cd3/8bp050iii-09-8_bit_weapon-fundanalogue.mp3
+    20070211043849 http://8bp050.8bitpeoples.com:80/cd3/8bp050iii-10-firestarter_aka_frau_holle-cherepovets.mp3
+    20070212135155 http://8bp050.8bitpeoples.com:80/cd3/8bp050iii-11-m-.-n.-3_dashes_of_pepper_miniravemix.mp3
+    20070212135238 http://8bp050.8bitpeoples.com:80/cd3/8bp050iii-12-overthruster-cillian_murphy_has_pretty_eyes.mp3
+    20070212000924 http://8bp050.8bitpeoples.com:80/cd3/8bp050iii-13-gijs_gieskes-dcbar.mp3
+    20070211101324 http://8bp050.8bitpeoples.com:80/cd3/8bp050iii-14-capitalsteps-stars.mp3
+    20070212000836 http://8bp050.8bitpeoples.com:80/cd3/8bp050iii-15-yesrobot-luvyrchips.mp3
+    20070212000937 http://8bp050.8bitpeoples.com:80/cd3/8bp050iii-16-trash80-b(a)it_and_switch.mp3
+    20070211101405 http://8bp050.8bitpeoples.com:80/cd3/8bp050iii-17-zabutom-robot_adventure_cloud_stage.mp3
+    20070212000901 http://8bp050.8bitpeoples.com:80/cd3/8bp050iii-18-sputnik_booster-computer_toy.mp3
+    20070212000849 http://8bp050.8bitpeoples.com:80/cd3/8bp050iii-19-snoopdroop-outnumbered.mp3
+    20070212135207 http://8bp050.8bitpeoples.com:80/cd3/8bp050iii-20-firebrand_boy-the_end.mp3
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: slopify-seed
+spec:
+  backoffLimit: 4
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: slopify-seed
+    spec:
+      restartPolicy: OnFailure
+      priorityClassName: topolvm
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+      containers:
+        - name: seed
+          image: alpine:3.22
+          command: [sh, /seed/seed.sh]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+          volumeMounts:
+            - name: seed
+              mountPath: /seed
+            - name: media
+              mountPath: /media
+      volumes:
+        - name: seed
+          configMap:
+            name: slopify-seed
+        - name: media
+          persistentVolumeClaim:
+            claimName: slopify-media

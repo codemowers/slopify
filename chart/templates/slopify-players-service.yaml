@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: slopify-players
+spec:
+  selector:
+    app.kubernetes.io/name: slopify
+    app.kubernetes.io/component: players
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

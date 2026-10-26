@@ -1,0 +1,7 @@
+/bin/
+# Private installation settings; tracked *.example files document them.
+/AGENTS.local.md
+/skaffold.env
+/chart/values-local.yaml
+/chart/values-demo.yaml
+/docker-compose.yaml

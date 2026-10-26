@@ -1,0 +1,64 @@
+# Explicit account allowlist; set this in your private installation values.
+allowedUsers: []
+domain: slopify.example.com
+imageRepository: ""
+# Images may include tags and digests; Skaffold replaces these after builds.
+images:
+  indexer: slopify-indexer:latest
+  catalog: slopify-catalog:latest
+  streamer: slopify-streamer:latest
+  players: slopify-players:latest
+  frontend: slopify-frontend:latest
+  transcoder: slopify-transcoder:latest
+imagePullSecret: ""
+priorityClassName: ""
+ingress:
+  enabled: true
+  className: ""
+networkPolicy:
+  enabled: false
+  # Add exact external IP CIDRs if your issuer resolves outside the cluster.
+  oidcEgress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: traefik
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: traefik
+    ports:
+    - protocol: TCP
+      port: 30443
+media:
+  hostPath: ""
+  existingClaim: ""
+  storageClassName: ""
+  size: 5Gi
+players:
+  existingClaim: ""
+  storageClassName: ""
+  size: 1Gi
+indexer:
+  metrics:
+    port: 9090
+    podMonitor:
+      enabled: false
+      labels: {}
+    # Set selectors for the actual Prometheus pods when network policy is enabled.
+    scrapeNamespaceSelector: {}
+    scrapePodSelector: {}
+transcodes:
+  maxBytes: 50000000000
+  # Each profile owns a separate PVC; these budgets total 50 GB.
+  storageClassName: ""
+  profiles:
+    opus-128:
+      size: 25Gi
+      maxBytes: 25000000000
+    mp3-192:
+      size: 25Gi
+      maxBytes: 25000000000
+    video-aac-192:
+      maxBytes: 0
+      # Stream copied video without caching movies in the audio cache budget.
+  concurrency: 2

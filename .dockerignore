@@ -1,0 +1,12 @@
+# Send only build inputs; exclude charts, local configuration and deploy tools.
+**
+!go.mod
+!go.sum
+!cmd/
+!cmd/**
+!internal/
+!internal/**
+!web/
+!web/**
+!build/
+!build/*.Dockerfile
