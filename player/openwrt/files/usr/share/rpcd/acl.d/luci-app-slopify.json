@@ -1,0 +1,14 @@
+{
+	"luci-app-slopify": {
+		"description": "Configure the Slopify player",
+		"read": {
+			"file": {
+				"/usr/libexec/slopify/audio-info": [ "exec" ]
+			},
+			"uci": [ "slopify", "system" ]
+		},
+		"write": {
+			"uci": [ "slopify", "system" ]
+		}
+	}
+}

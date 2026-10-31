@@ -5,3 +5,8 @@
 /chart/values-local.yaml
 /chart/values-demo.yaml
 /docker-compose.yaml
+/deploy/raspi/local/
+
+# Appliance LAN configuration
+/deploy/audio/.env
+/dist/

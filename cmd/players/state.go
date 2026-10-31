@@ -16,6 +16,7 @@ import (
 	"github.com/codemowers/slopify/internal/heuristics"
 	"github.com/codemowers/slopify/internal/media"
 	"github.com/codemowers/slopify/internal/signedurl"
+	"github.com/codemowers/slopify/internal/volume"
 )
 
 const (
@@ -57,11 +58,16 @@ type Entry struct {
 // Player is the authoritative state of one output. Devices running
 // slopify-player and browser tabs follow it and report back what they do.
 type Player struct {
+	Volume *volume.Control `json:"volume,omitempty"`
 	// User queues are durable; outputs are replaceable playback targets.
 	OutputID     string   `json:"outputId,omitempty"`
 	OutputIDs    []string `json:"outputIds,omitempty"`
 	CurrentEntry *Entry   `json:"currentEntry,omitempty"`
 	Owner        string   `json:"owner,omitempty"`
+	OwnerIssuer  string   `json:"ownerIssuer,omitempty"`
+	OwnerSubject string   `json:"ownerSubject,omitempty"`
+	OwnerName    string   `json:"ownerName,omitempty"`
+	ReportedName string   `json:"reportedName,omitempty"`
 	ID           string   `json:"id"`
 	Kind         string   `json:"kind"`
 	Name         string   `json:"name"`
@@ -86,8 +92,10 @@ type Player struct {
 	// Version counts commands; reports about older versions are stale.
 	Version uint64 `json:"version"`
 	// Blocked means a browser tab could not start audio without a user gesture.
-	Blocked bool   `json:"blocked,omitempty"`
-	NextID  uint64 `json:"nextId"`
+	Blocked bool `json:"blocked,omitempty"`
+	// Repeat continues from the first entry when the queue ends.
+	Repeat bool   `json:"repeat,omitempty"`
+	NextID uint64 `json:"nextId"`
 
 	Receivers            int `json:"receivers,omitempty"`
 	receivers            map[string]*linkReceiver
@@ -160,6 +168,37 @@ func (s *store) load() error {
 		p.UpdatedAt = time.Now()
 		s.players[p.ID] = p
 	}
+	// Existing hardware ownership can only be inferred from one durable queue.
+	for _, p := range s.players {
+		if p.Kind != Device {
+			continue
+		}
+		if p.ReportedName == "" && !p.NameSet {
+			p.ReportedName = p.Name
+		}
+		if p.Owner == "" {
+			owner := ""
+			ambiguous := false
+			for _, q := range s.players {
+				if q.Kind == User && slices.Contains(queueOutputs(q), p.ID) {
+					if owner != "" && owner != q.ID {
+						ambiguous = true
+					}
+					owner = q.ID
+				}
+			}
+			if !ambiguous && owner != "" && p.Adopted {
+				p.Owner = owner
+			} else {
+				p.Adopted = false
+				p.State = Stopped
+				p.Queue = nil
+				p.CurrentEntry = nil
+				p.Current = 0
+			}
+		}
+		refreshDeviceName(p)
+	}
 	for _, q := range s.players {
 		if q.Kind != User {
 			continue
@@ -168,7 +207,7 @@ func (s *store) load() error {
 		// stale selections before a new tab tries to join the user's queue.
 		q.OutputIDs = slices.DeleteFunc(slices.Clone(queueOutputs(q)), func(id string) bool {
 			p := s.players[id]
-			return p == nil || p.Kind == User || ((p.Kind == Browser || p.Kind == WebSink) && p.Owner != "" && p.Owner != q.ID)
+			return p == nil || p.Kind == User || ((p.Kind == Browser || p.Kind == WebSink || p.Kind == Device) && p.Owner != q.ID)
 		})
 		s.selectPrimary(q)
 		if p := s.players[q.OutputID]; p != nil {
@@ -223,6 +262,8 @@ func (s *store) marshal(p *Player) []byte {
 	if p.Kind != User && p.CurrentEntry != nil && p.index(p.Current) < 0 {
 		public.Queue = append([]Entry{*p.CurrentEntry}, p.Queue...)
 	}
+	public.OwnerIssuer = ""
+	public.OwnerSubject = ""
 	public.TokenHash = ""
 	public.LinkHash = ""
 	public.Receivers = len(p.receivers)
@@ -299,7 +340,8 @@ func (p *Player) entry(id uint64) *Entry {
 	return nil
 }
 
-// after returns the entry following id, or 0 at the end of the queue.
+// after returns the entry following id. At the end of the queue that is the
+// first entry when repeating, otherwise 0.
 func (p *Player) after(id uint64) uint64 {
 	if p.index(id) < 0 && p.CurrentEntry != nil && p.CurrentEntry.ID == id && len(p.Queue) > 0 {
 		return p.Queue[0].ID
@@ -307,12 +349,18 @@ func (p *Player) after(id uint64) uint64 {
 	if i := p.index(id); i >= 0 && i+1 < len(p.Queue) {
 		return p.Queue[i+1].ID
 	}
+	if p.Repeat && len(p.Queue) > 0 {
+		return p.Queue[0].ID
+	}
 	return 0
 }
 
 func (p *Player) before(id uint64) uint64 {
 	if i := p.index(id); i > 0 {
 		return p.Queue[i-1].ID
+	}
+	if p.Repeat && p.index(id) == 0 {
+		return p.Queue[len(p.Queue)-1].ID
 	}
 	return 0
 }
@@ -375,6 +423,7 @@ func (s *store) add(p *Player, tracks []Entry, at int) error {
 
 // command is a request to change a player, from any UI.
 type command struct {
+	Level    *int     `json:"level,omitempty"`
 	Op       string   `json:"op"`
 	ID       uint64   `json:"id"`
 	IDs      []uint64 `json:"ids"`
@@ -385,19 +434,28 @@ type command struct {
 	To       string   `json:"to"`
 	Outputs  []string `json:"outputs"`
 	Name     string   `json:"name"`
+	Repeat   bool     `json:"repeat"`
 }
 
 func (s *store) command(id string, c command) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.commandLocked(id, c)
+}
+func (s *store) commandLocked(id string, c command) error {
 	p, ok := s.players[id]
 	if !ok {
 		return errNotFound
 	}
 	switch c.Op {
 	case "adopt":
-		p.Adopted = true
+		return errBadRequest // claiming requires an authenticated user
 	case "rename":
+		if c.Name == "" && p.Kind == Device {
+			p.NameSet = false
+			refreshDeviceName(p)
+			break
+		}
 		if c.Name == "" || len(c.Name) > 64 {
 			return errBadRequest
 		}
@@ -471,6 +529,8 @@ func (s *store) playback(p *Player, c command) error {
 			return errBadRequest
 		}
 		p.setPos(c.Position, p.State)
+	case "repeat":
+		p.Repeat = c.Repeat
 	case "append", "insert":
 		at := len(p.Queue)
 		// Append is tail-only. Explicit drag/drop insertion is a separate action.

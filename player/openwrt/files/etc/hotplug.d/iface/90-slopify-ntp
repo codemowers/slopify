@@ -1,0 +1,5 @@
+# Without dnsmasq, ntpd's jail starts before DHCP has supplied DNS, so it never
+# reaches a time server. A Pi has no clock of its own, and TLS needs the time.
+[ "$ACTION" = ifup ] && [ "$INTERFACE" = lan ] || exit 0
+/etc/init.d/sysntpd enabled && /etc/init.d/sysntpd restart
+exit 0

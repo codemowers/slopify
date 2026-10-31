@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Slopify speaker</title><link rel="stylesheet" href="/style.css"><script src="/requests.js" defer></script><script src="/sources.js" defer></script><script src="/app.js" defer></script></head>
+<body><main><header><h1>Slopify speaker</h1><p id="connection" role="status">Connecting to speaker…</p></header>
+<p id="status-error" role="status" hidden></p><section id="standalone-output" hidden><h2>Output</h2><div id="volume-fallback"></div><p id="playback-progress" role="status" hidden><span class="routing-spinner" aria-hidden="true"></span><span></span></p><div id="streams"></div></section>
+<div id="sources" hidden><label for="source-mode">Automatic selection</label><select id="source-mode"><option value="off" disabled>Off - unpin source to enable</option><option value="recent">Recent — latest to start making sound</option><option value="priority">Priority — first sounding source in this order</option></select><p class="muted">Click an open lock to pin a source, or the closed lock to resume automatic selection. In Priority mode, drag cards to reorder; the arrows work with a keyboard.</p><div id="sound-guard"><label id="sound-duration-label" for="sound-duration">Minimum sound duration</label> <output id="sound-duration-value"></output><input id="sound-duration" type="range" min="0" max="2000" step="100" value="500"><p id="sound-duration-help" class="muted">Recent mode only: require sustained sound before switching. Short notifications won’t take over; notifications mixed into the selected source still play.</p></div><p id="source-error" role="status"></p><div id="source-routing"><svg id="source-connections" aria-hidden="true"></svg><div id="source-cards"></div><div id="source-output"><span class="eyebrow">HARDWARE OUTPUT</span><h3 id="output-name">Amplifier</h3><p id="output-device" class="muted" hidden></p><p id="output-format" class="muted"></p><div id="hardware-volume" hidden><p id="volume"></p><div id="volume-controls" hidden><label for="volume-slider">Hardware volume</label><input id="volume-slider" type="range" step="1"><button id="mute" type="button" aria-pressed="false">Mute</button></div></div><p id="routing-progress" role="status" hidden><span class="routing-spinner" aria-hidden="true"></span><span id="routing-progress-text"></span><button id="switch-now" type="button" hidden>Switch now</button></p><canvas id="output-envelope" width="750" height="130" aria-label="Recent selected-source peak envelope"></canvas></div></div></div>
+
+      <div class="sender-setup">
+        <h2>Send audio here</h2>
+        <p id="sender-intro">Ubuntu 24.04/26.04 can send through Pulse TCP. Keep sender and speaker on a reachable network.</p>
+        <p>Speaker address: <code id="lan-audio-host"></code> (from this page’s address).</p>
+        <div class="sender-tabs" role="tablist" aria-label="Audio connection method">
+          <button id="tab-zeroconf" type="button" role="tab" aria-selected="true" aria-controls="pulse-help" tabindex="0">Zeroconf native</button>
+          <button id="tab-airplay" hidden type="button" role="tab" aria-selected="false" aria-controls="raop-help" tabindex="-1">AirPlay</button>
+          <button id="tab-fixed" type="button" role="tab" aria-selected="false" aria-controls="fixed-help" tabindex="-1">Fixed</button>
+          <button id="tab-esound" hidden type="button" role="tab" aria-selected="false" aria-controls="esound-help" tabindex="-1">Windows XP/2000</button>
+        </div>
+        <div id="ubuntu-tools">
+        <h3>Ubuntu command-line tools</h3>
+        <pre><code id="lan-audio-install">sudo apt install pulseaudio-utils</code></pre>
+        <button type="button" data-copy-lan="lan-audio-install">Copy install command</button>
+        </div>
+        <div id="raop-help" role="tabpanel" aria-labelledby="tab-airplay" hidden>
+        <h3>Ubuntu: discover AirPlay speakers</h3>
+        <p>On a PipeWire desktop, run once per audio session, without sudo:</p>
+        <pre><code id="lan-raop-connect">pactl load-module module-raop-discover
+pactl list short sinks</code></pre>
+        <button type="button" data-copy-lan="lan-raop-connect">Copy discovery commands</button>
+        <p>Select the advertised speaker in Ubuntu Sound settings. Move already-running applications with pavucontrol if needed. Select the AirPlay source in this speaker’s Sources section, or enable Recent/Priority selection.</p>
+        <h3>Persistent AirPlay discovery — this user</h3>
+        <p>On Ubuntu 24.04/26.04 with PipeWire, load RAOP discovery after login. Restarting audio briefly interrupts playback.</p>
+        <pre><code id="lan-raop-persist">mkdir -p ~/.config/pipewire/pipewire-pulse.conf.d
+cat &gt; ~/.config/pipewire/pipewire-pulse.conf.d/30-airplay-discovery.conf &lt;&lt;'EOF'
+pulse.cmd = [ { cmd = "load-module" args = "module-raop-discover" } ]
+EOF
+systemctl --user restart pipewire-pulse</code></pre>
+        <button type="button" data-copy-lan="lan-raop-persist">Copy AirPlay startup</button>
+        <h3>Persistent AirPlay discovery — system-wide</h3>
+        <p>Use this instead of the per-user snippet to enable discovery for every user's audio session.</p>
+        <pre><code id="lan-raop-system">sudo mkdir -p /etc/pipewire/pipewire-pulse.conf.d
+sudo tee /etc/pipewire/pipewire-pulse.conf.d/30-airplay-discovery.conf &gt; /dev/null &lt;&lt;'EOF'
+pulse.cmd = [ { cmd = "load-module" args = "module-raop-discover" } ]
+EOF
+systemctl --user restart pipewire-pulse</code></pre>
+        <button type="button" data-copy-lan="lan-raop-system">Copy system-wide AirPlay discovery</button>
+        <p>Choose one scope. The restart affects your current user; other users pick up the setting at their next audio-session start. To disable persistent AirPlay discovery, remove 30-airplay-discovery.conf from the chosen location and restart that user's PipeWire-Pulse session.</p>
+        <h3>macOS, iPhone and iPad</h3>
+        <p>Open Control Centre, choose the audio output/AirPlay selector and select this speaker’s advertised name. On macOS, the output is also available in Sound settings.</p>
+        <h3>If the speaker is missing</h3>
+        <p>Check that Shairport and mDNS discovery are running on the speaker and that the LAN/VPN permits multicast DNS (UDP 5353) and the receiver’s audio ports. If module loading fails, check that the laptop’s PipeWire installation includes its RAOP discovery module. To remove temporary discovery, find module-raop-discover with <code>pactl list short modules</code>, then run <code>pactl unload-module MODULE_ID</code>.</p>
+        </div>
+        <div id="pulse-help" role="tabpanel" aria-labelledby="tab-zeroconf">
+        <h3>Automatic discovery on the same LAN</h3>
+        <p>This speaker advertises its hostname as a Pulse sink over mDNS. Enable discovery on your Ubuntu laptop, then choose the advertised speaker in Sound settings:</p>
+        <pre><code id="lan-audio-discover">pactl unload-module module-zeroconf-discover 2&gt;/dev/null
+pactl load-module module-zeroconf-discover
+pactl list short sinks</code></pre>
+        <button type="button" data-copy-lan="lan-audio-discover">Copy discovery commands</button>
+        <h3>Persistent discovery — this user</h3>
+        <p>To load discovery after login on an Ubuntu 24.04/26.04 PipeWire desktop, save the configuration below. Restarting desktop audio interrupts playback. Use discovery or the manual tunnel below to avoid duplicate outputs.</p>
+        <pre><code id="lan-audio-discover-persist">mkdir -p ~/.config/pipewire/pipewire-pulse.conf.d
+cat &gt; ~/.config/pipewire/pipewire-pulse.conf.d/30-speaker-discovery.conf &lt;&lt;'EOF'
+pulse.cmd = [ { cmd = "load-module" args = "module-zeroconf-discover" } ]
+EOF
+systemctl --user restart pipewire-pulse</code></pre>
+        <button type="button" data-copy-lan="lan-audio-discover-persist">Copy discovery startup</button>
+        <h3>Persistent discovery — system-wide</h3>
+        <p>To enable discovery for every user on this laptop, install the snippet under /etc instead. Each user still runs their own PipeWire-Pulse session. Choose either the per-user or system-wide configuration; do not install both.</p>
+        <pre><code id="lan-audio-discover-system">sudo mkdir -p /etc/pipewire/pipewire-pulse.conf.d
+sudo tee /etc/pipewire/pipewire-pulse.conf.d/30-speaker-discovery.conf &gt; /dev/null &lt;&lt;'EOF'
+pulse.cmd = [ { cmd = "load-module" args = "module-zeroconf-discover" } ]
+EOF
+systemctl --user restart pipewire-pulse
+pactl list short sinks</code></pre>
+        <button type="button" data-copy-lan="lan-audio-discover-system">Copy system-wide discovery</button>
+        <p>The restart applies to your current user and briefly interrupts audio. Other users pick up the setting at their next audio-session start, or can run the same restart command themselves without sudo. To disable persistent discovery, remove the configuration file from the location you chose and restart that user's PipeWire-Pulse session.</p>
+        </div>
+        <div id="fixed-help" role="tabpanel" aria-labelledby="tab-fixed" hidden>
+        <h3>Manual IP tunnel — including across subnets</h3>
+        <p>mDNS normally stays on one network segment. Across a routed subnet or VPN, use this explicit address instead; the speaker’s TCP port 4713 must be reachable. These commands use the address you opened this page with.</p>
+        <p>Run in your laptop terminal. Use sudo only for installing the tools. Add this output once per audio session.</p>
+        <pre><code id="lan-audio-connect">pactl unload-module module-tunnel-sink 2&gt;/dev/null
+pactl load-module module-tunnel-sink server=tcp:SPEAKER_IP:4713 sink=SPEAKER_DEVICE sink_name=SPEAKER_SINK "sink_properties='device.description=\"SPEAKER_NAME\"'"
+pactl set-default-sink SPEAKER_SINK</code></pre>
+        <button type="button" data-copy-lan="lan-audio-connect">Copy setup commands</button>
+        <h3>One application, skipping the laptop’s audio server</h3>
+        <p>Applications using PulseAudio can connect to the speaker directly. The stream is not mixed: a second application from this laptop replaces the first, and it has no microphone. Quit Chrome completely first, or this only opens a window in the running one.</p>
+        <pre><code id="lan-audio-direct">PULSE_SERVER=tcp:SPEAKER_IP:4713 google-chrome</code></pre>
+        <button type="button" data-copy-lan="lan-audio-direct">Copy command</button>
+        <h3>2. Select Slopify</h3>
+        <p>Choose the speaker’s advertised hostname under Output in Ubuntu Sound settings. Already-running applications may need to be moved separately with pavucontrol. When source control is enabled, select the laptop under Sources or choose Recent or Priority for automatic switching. Otherwise pause the speaker’s Slopify queue first.</p>
+        <p>When the speaker’s hardware-volume bridge is enabled, laptop output volume controls the speaker within its configured limits. New connections inherit the current speaker level; knob and web volume changes update the laptop control. Mute applies to the laptop stream.</p>
+        <h3>3. Keep it after login (optional)</h3>
+        <p>For a PipeWire desktop, save this startup configuration after the temporary output works. Restarting desktop audio interrupts playback; the temporary output is replaced on restart.</p>
+        <pre><code id="lan-audio-persist">mkdir -p ~/.config/pipewire/pipewire-pulse.conf.d
+cat &gt; ~/.config/pipewire/pipewire-pulse.conf.d/30-slopify.conf &lt;&lt;'EOF'
+pulse.cmd = [
+  { cmd = "load-module"
+    args = "module-tunnel-sink server=tcp:SPEAKER_IP:4713 sink=SPEAKER_DEVICE sink_name=SPEAKER_SINK sink_properties='device.description=\"SPEAKER_NAME\"'"
+  }
+]
+EOF
+systemctl --user restart pipewire-pulse</code></pre>
+        <button type="button" data-copy-lan="lan-audio-persist">Copy startup commands</button>
+        <h3>Connection checks and removal</h3>
+        <pre><code id="lan-audio-check">pactl info
+pactl --server=tcp:SPEAKER_IP:4713 list short sinks
+pactl list short modules</code></pre>
+        <button type="button" data-copy-lan="lan-audio-check">Copy checks</button>
+        <p>A connection failure usually means the address, speaker receiver or network needs checking. To remove the temporary output, select your laptop speakers, find the module-tunnel-sink ID in the module list, then run <code>pactl unload-module MODULE_ID</code>. For a persistent output, also remove its <code>30-slopify.conf</code> startup file.</p>
+        </div>
+        <div id="esound-help" role="tabpanel" aria-labelledby="tab-esound" hidden>
+        <h3>Windows XP and 2000: ESound</h3>
+        <p>Install the <a href="http://www.clingman.org/winesd/" target="_blank" rel="noopener noreferrer">WinESD driver</a> from the Multimedia control panel, then point it at this speaker. WinESD is old pre-alpha software with no authentication, so use it on a trusted LAN only.</p>
+        <p>Windows XP, from a command prompt:</p>
+        <pre><code id="esound-reg-add"></code></pre>
+        <button type="button" data-copy-lan="esound-reg-add">Copy registry command</button>
+        <p>Windows 2000 may not include <code>reg</code>. Save this as <code>winesd.reg</code> and open it in Registry Editor:</p>
+        <pre><code id="esound-reg-file"></code></pre>
+        <button type="button" data-copy-lan="esound-reg-file">Copy registry file</button>
+        </div>
+      </div>
+<p id="toast" role="status"></p></main>
+<footer class="project-footer">
+    <a href="https://github.com/codemowers/slopify" target="_blank" rel="noopener noreferrer" aria-label="codemowers/slopify on GitHub"><svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor" aria-hidden="true"><path d="M12 .75a11.25 11.25 0 0 0-3.56 21.92c.56.1.77-.24.77-.54v-2.1c-3.13.68-3.79-1.33-3.79-1.33-.51-1.3-1.25-1.65-1.25-1.65-1.02-.7.08-.69.08-.69 1.13.08 1.72 1.16 1.72 1.16 1 1.72 2.63 1.22 3.27.94.1-.73.39-1.22.71-1.5-2.5-.28-5.13-1.25-5.13-5.56 0-1.23.44-2.23 1.16-3.02-.12-.28-.5-1.43.11-2.98 0 0 .95-.3 3.09 1.15a10.77 10.77 0 0 1 5.62 0c2.14-1.45 3.08-1.15 3.08-1.15.61 1.55.23 2.7.11 2.98.72.79 1.16 1.79 1.16 3.02 0 4.32-2.64 5.28-5.15 5.56.4.35.76 1.03.76 2.08v3.09c0 .3.2.65.78.54A11.25 11.25 0 0 0 12 .75Z"/></svg><span>codemowers/slopify</span></a>
+  </footer>
+</body></html>

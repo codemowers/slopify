@@ -23,7 +23,7 @@ trap 'rm -rf "$work"' EXIT
 # existing paths also supports uncommitted source removals during development.
 for svc in $services; do
   case $svc in
-    indexer | catalog | streamer | players | frontend | transcoder | player) ;;
+    indexer | catalog | streamer | players | frontend | transcoder) ;;
     *) echo "unknown service: $svc" >&2; exit 1 ;;
   esac
 done
@@ -107,7 +107,6 @@ if [ "$#" -eq 0 ]; then
 else
   # Partial builds only roll the rebuilt Deployments.
   while IFS== read -r name ref; do
-    [ "$name" = slopify-player ] && continue # runs on devices, not here
     if [ "$name" = slopify-transcoder ]; then
       k set image deployment -l app.kubernetes.io/name=slopify,app.kubernetes.io/component=transcoder "transcoder=$ref"
     else

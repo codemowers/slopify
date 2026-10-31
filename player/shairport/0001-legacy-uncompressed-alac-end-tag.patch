@@ -1,0 +1,42 @@
+From: Slopify contributors
+Subject: [PATCH] restore missing end tag on bounded legacy RAOP ALAC frames
+
+PipeWire 1.0.x omits ID_END in its uncompressed stereo S16 encoder.
+Recognize the exact header, frame count and payload size before normalizing
+the packet into an owned, padded AVPacket. All other formats remain untouched.
+
+--- a/player.c
++++ b/player.c
+@@ -1322,8 +1322,30 @@
+     if (pkt) {
+       // push a deallocator -- av_packet_free(pkt);
+       pthread_cleanup_push(av_packet_alloc_cleanup_handler, &pkt);
+-      pkt->data = incoming_data;
+-      pkt->size = incoming_data_length;
++      // PipeWire 1.0.x emits stereo S16 uncompressed ALAC without ID_END.
++      // Recognize only its exact bounded layout; never modify compressed data.
++      uint32_t legacy_frames = 0;
++      if (conn->codec_context->codec_id == AV_CODEC_ID_ALAC &&
++          incoming_data_length >= 11 && incoming_data_length <= 1415 &&
++          incoming_data[0] == 0x20 && incoming_data[1] == 0 &&
++          (incoming_data[2] & 0xfe) == 0x12 &&
++          (incoming_data[incoming_data_length - 1] & 1) == 0)
++        legacy_frames = ((uint32_t)(incoming_data[2] & 1) << 31) |
++                        ((uint32_t)incoming_data[3] << 23) |
++                        ((uint32_t)incoming_data[4] << 15) |
++                        ((uint32_t)incoming_data[5] << 7) |
++                        (incoming_data[6] >> 1);
++      if (legacy_frames > 0 && legacy_frames <= 352 &&
++          incoming_data_length == 7 + 4 * legacy_frames) {
++        if (av_new_packet(pkt, incoming_data_length + 1) < 0)
++          die("could not allocate legacy ALAC framing buffer");
++        memcpy(pkt->data, incoming_data, incoming_data_length);
++        pkt->data[incoming_data_length - 1] |= 1;
++        pkt->data[incoming_data_length] = 0xc0; // remaining two ID_END bits, then padding
++      } else {
++        pkt->data = incoming_data;
++        pkt->size = incoming_data_length;
++      }
+       int ret = avcodec_send_packet(conn->codec_context, pkt);
+       if (ret == 0) {
+         decoded_frame = av_frame_alloc();

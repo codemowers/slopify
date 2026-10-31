@@ -1,0 +1,21 @@
+# Follow USB DAC hotplug when slopify.player.card is auto: restart the
+# player only when the selected card actually changes.
+
+case "$DEVNAME" in
+snd/controlC*) ;;
+*) exit 0 ;;
+esac
+case "$ACTION" in
+add|remove) ;;
+*) exit 0 ;;
+esac
+
+. /usr/libexec/slopify/common.sh
+
+# Not started yet (boot coldplug) or stopped deliberately.
+[ -r "$SLOPIFY_RUN/player-card" ] || exit 0
+read -r previous < "$SLOPIFY_RUN/player-card"
+[ "$(slopify_card)" = "$previous" ] && exit 0
+
+logger -t slopify "audio card changed from '$previous' to '$(slopify_card)'"
+/etc/init.d/slopify-player restart

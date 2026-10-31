@@ -1,0 +1,16 @@
+--- a/audio_pw.c
++++ b/audio_pw.c
+@@ -1357,6 +1357,13 @@
+       break;
+     }
+ 
++    // Advertise the negotiated source rate to native-rate routing policy.
++    char node_rate[32];
++    snprintf(node_rate, sizeof(node_rate), "1/%u", data.rate);
++    struct spa_dict_item rate_item = SPA_DICT_ITEM_INIT(PW_KEY_NODE_RATE, node_rate);
++    struct spa_dict rate_props = SPA_DICT_INIT(&rate_item, 1);
++    pw_stream_update_properties(data.stream, &rate_props);
++
+     // Now connect this stream. We ask that our process function is
+     // called in a realtime thread.
+     pw_stream_connect(data.stream, PW_DIRECTION_OUTPUT, PW_ID_ANY,

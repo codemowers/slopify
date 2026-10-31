@@ -76,6 +76,7 @@ const state = {
   treeSel: null,
   drag: null, // tree node or playlist entry IDs being dragged
   queueKey: "",
+  queueCurrentKey: "",
   folderPath: ".",
 };
 
@@ -199,7 +200,7 @@ function put(p) {
   if (p.kind === "user") {
     state.queueId = p.id;
     state.selected = p.outputId || "";
-    state.outputIds = p.outputIds || (p.outputId ? [p.outputId] : []);
+    state.outputIds = outputIntent || p.outputIds || (p.outputId ? [p.outputId] : []);
   }
   if (p.id === me) reconcile(p);
 }
@@ -290,7 +291,13 @@ onMedia("pause", () => {
   }, 200);
 });
 onMedia("play", () => performance.now() > engine.quietUntil && report());
-setInterval(() => !audio.paused && report(), 5000);
+// Hidden tabs include screen-off mobile browsers. Keep transport events (ended,
+// play/pause, seek) reporting, but avoid periodic HTTP while backgrounded.
+const reportProgress = () => {
+  if (document.visibilityState === "visible" && !audio.paused) report();
+};
+setInterval(reportProgress, 5000);
+document.addEventListener("visibilitychange", reportProgress);
 
 $("unblock").addEventListener("click", () => {
   $("blocked").hidden = true;
@@ -319,6 +326,7 @@ function render() {
   const e = current(p);
   $("play").textContent = p.state === "playing" ? "⏸" : "▶";
   $("play").setAttribute("aria-label", p.state === "playing" ? "Pause" : "Play");
+  $("repeat").setAttribute("aria-pressed", String(Boolean(p.repeat)));
   $("connected-output").textContent = outputSummary();
   $("now-title").textContent = e ? `${e.title}${e.artist ? " — " + e.artist : ""}` : "Nothing playing";
   document.title = e && p.state === "playing" ? `${e.title} · Slopify` : "Slopify";
@@ -337,12 +345,11 @@ function renderPlaylist(p) {
     state.queueKey = key;
     const ids = new Set(queue.map((e) => e.id));
     for (const id of state.sel) if (!ids.has(id)) state.sel.delete(id);
-    tbody.replaceChildren(...queue.map((e, i) => el("tr", { draggable: true, data: { id: e.id } },
-      el("td", { class: "c-num" }, String(i + 1)),
+    tbody.replaceChildren(...queue.map((e) => el("tr", { draggable: true, data: { id: e.id } },
       el("td", { title: codecTooltip(e), class: "queue-title" },
         el("button", { class: "queue-play", ariaLabel: `Play ${e.title}`, title: "Play now", onclick: (ev) => { ev.stopPropagation(); cmd("play", { id: e.id }); } }, "▶"),
         el("span", {}, `${isVideo(e) ? "▣ " : ""}${e.title}`)),
-      el("td", {}, e.artist || ""), el("td", {}, e.album || ""),
+      el("td", {}, e.artist || ""), el("td", { class: "c-album" }, e.album || ""),
       el("td", { class: "c-len" }, e.duration ? fmtTime(e.duration) : ""),
       el("td", { class: "c-actions" }, el("button", { class: "queue-remove", ariaLabel: `Remove ${e.title} from queue`, title: "Remove from queue", onclick: (ev) => { ev.stopPropagation(); cmd("remove", { ids: [e.id] }); } }, "×")))));
     const total = queue.reduce((s, e) => s + (e.duration || 0), 0);
@@ -354,6 +361,23 @@ function renderPlaylist(p) {
     const id = Number(tr.dataset.id);
     tr.classList.toggle("current", id === p.current);
     tr.classList.toggle("selected", state.sel.has(id));
+  }
+  const currentKey = `${p.id}:${p.current || 0}`;
+  if (currentKey !== state.queueCurrentKey) {
+    state.queueCurrentKey = currentKey;
+    requestAnimationFrame(() => {
+      if (state.queueCurrentKey !== currentKey) return;
+      const row = tbody.querySelector("tr.current");
+      const viewport = tbody.closest(".table-wrap");
+      if (!row || !viewport || !viewport.clientHeight) return;
+      const rowBounds = row.getBoundingClientRect();
+      const bounds = viewport.getBoundingClientRect();
+      const heading = $("playlist").tHead?.getBoundingClientRect().height || 0;
+      viewport.scrollTo({
+        top: viewport.scrollTop + rowBounds.top - bounds.top - (viewport.clientHeight + heading - rowBounds.height) / 2,
+        behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+      });
+    });
   }
 }
 
@@ -371,12 +395,28 @@ function tick() {
 }
 setInterval(tick, 500);
 
+let outputIntent = null;
+let outputSending = false;
 async function setOutput(id, enabled) {
   if (!state.playersReady) return toast("Reconnecting to playback…");
   const existing = state.outputIds.filter((output) => state.players.has(output));
-  const ids = enabled ? [...new Set([...existing, id])] : existing.filter((x) => x !== id);
-  try { await post("players/me/command", { op: "outputs", outputs: ids }); }
-  catch (e) { toast(e.message); render(); }
+  outputIntent = enabled ? [...new Set([...existing, id])] : existing.filter((x) => x !== id);
+  state.outputIds = outputIntent;
+  render();
+  if (outputSending) return;
+  outputSending = true;
+  try {
+    while (outputIntent) {
+      const sent = outputIntent;
+      await post("players/me/command", {op: "outputs", outputs: sent});
+      if (outputIntent === sent) outputIntent = null;
+    }
+  } catch (error) {
+    outputIntent = null;
+    const q = player();
+    state.outputIds = q?.outputIds || (q?.outputId ? [q.outputId] : []);
+    toast(error.message);
+  } finally { outputSending = false; render(); }
 }
 async function attachOutput(id) { await setOutput(id, true); }
 
@@ -400,33 +440,105 @@ function outputSummary() {
 
 function sessionCount(count = 0) { return `${count} session${count === 1 ? "" : "s"}`; }
 
+const deviceCards = new Map();
+const volumePending = new Map();
+function volumeLabel(v, level) {
+  // The hardware's own report wins for the current level; the table previews a drag.
+  if (level === v.level) {
+    if (v.muted) return "−∞ dB";
+    if (Number.isFinite(v.db)) return `${v.db.toFixed(1)} dB`;
+  }
+  const step = v.steps.find((s) => s.level === level);
+  return step?.muted ? "−∞ dB" : Number.isFinite(step?.db) ? `${step.db.toFixed(1)} dB` : "—";
+}
+function outputVolume(p) {
+  const v = p.volume;
+  if (!v || !p.adopted) return null;
+  const label = el("output", {}, volumeLabel(v, v.level));
+  const input = el("input", {type: "range", min: v.min, max: v.max, step: 1, value: v.level,
+    ariaLabel: `${p.name} volume`, ariaValueText: volumeLabel(v, v.level),
+    oninput: (ev) => {
+      label.textContent = volumeLabel(v, Number(ev.target.value));
+      ev.target.setAttribute("aria-valuetext", label.textContent);
+    },
+    onchange: async (ev) => {
+      const level = Number(ev.target.value);
+      volumePending.set(p.id, level);
+      try { await post(`players/${p.id}/command`, {op: "volume", level}); }
+      catch (error) { volumePending.delete(p.id); toast(error.message); }
+      finally {
+        renderDevices(visibleOutputs());
+        setTimeout(() => {
+          if (volumePending.get(p.id) === level) {
+            volumePending.delete(p.id);
+            renderDevices(visibleOutputs());
+          }
+        }, 5000);
+      }
+    }});
+  return el("label", {class: "output-volume"}, el("span", {}, "Volume"), input, label);
+}
 function renderDevices(outputs) {
   if (state.drag?.output) return;
-  $("devices").replaceChildren(...outputs.map((p) => {
+  const container = $("devices");
+  for (const [id, row] of deviceCards) {
+    if (!outputs.some((p) => p.id === id)) { row.card.remove(); deviceCards.delete(id); }
+  }
+  outputs.forEach((p, index) => {
     const checked = state.outputIds.includes(p.id);
-    const checkbox = el("input", { type: "checkbox", checked, disabled: !state.playersReady || !p.adopted || (!p.available && !checked),
-      ariaLabel: `Play on ${p.id === me ? "this browser" : p.name}`,
-      onchange: (ev) => setOutput(p.id, ev.target.checked) });
-    const card = el("div", { class: "device-card" + (checked ? " attached" : "") + (!p.available ? " offline" : ""), draggable: p.adopted && p.available },
-      el("label", { class: "device-choice" }, checkbox,
-        el("span", { class: "device-info" }, el("strong", {}, p.id === me ? "This browser" : p.name),
-          el("span", {}, p.kind === "web-sink" ? `Web sink · ${sessionCount(p.receivers)}` : p.connected ? p.kind === "device" ? "Audio output" : "Audio and video" : checked ? "Offline · selected" : "Offline"))),
-      !p.adopted ? el("button", { onclick: () => cmd("adopt", {}, p.id) }, "Adopt") : null,
-      p.kind === "web-sink" ? el("div", {class: "shared-output-actions"},
-        el("button", {title: "Create a new link and invalidate the previous one", onclick: () => newOutputLink(p.id)}, "New link"),
-        el("button", {onclick: async () => {
-          try { await post(`players/${p.id}/command`, {op: "forget"}); toast("Browser output link revoked."); }
-          catch (error) { toast(error.message); }
-        }}, "Revoke")) : null);
-    card.addEventListener("dragstart", (ev) => {
-      state.drag = { output: p.id };
-      ev.dataTransfer.effectAllowed = "copy";
-      ev.dataTransfer.setData("text/plain", p.name);
-      $("menu-backdrop").hidden = true;
-      $("settings-panel").style.pointerEvents = "none";
-    });
-    return card;
-  }));
+    // Playback position reports must not replace controls or steal focus.
+    const signature = JSON.stringify([p.name, p.reportedName, p.nameSet, p.kind, p.adopted, p.volume?.name, p.volume?.min, p.volume?.max, p.volume?.steps]);
+    let row = deviceCards.get(p.id);
+    if (!row || row.signature !== signature) {
+      const toggle = el("button", {type: "button", class: "device-choice",
+        onclick: () => setOutput(p.id, !state.outputIds.includes(p.id))},
+        el("span", {class: "output-icon", ariaHidden: "true"}),
+        el("span", {class: "device-info"}, el("strong", {}, p.id === me ? "This browser" : p.name), el("span")));
+      const card = el("div", {class: "device-card"}, toggle,
+        !p.adopted ? el("button", {onclick: () => cmd("adopt", {}, p.id)}, "Pair with my account") : null,
+        p.kind==="device" && p.adopted ? el("div", {class:"shared-output-actions"},
+          el("button", {onclick:async()=>{const name=prompt("Web display name (leave empty for the owner + player name)",p.nameSet?p.name:"");if(name===null)return;try{await cmd("rename",{name},p.id);}catch(error){toast(error.message);}}}, "Rename"),
+          p.nameSet ? el("button", {onclick:()=>cmd("rename",{name:""},p.id)},"Use default name") : null,
+          el("small", {}, `Player reports: ${p.reportedName||p.name}`)) : null,
+        outputVolume(p),
+        p.kind === "web-sink" ? el("div", {class: "shared-output-actions"},
+          el("button", {title: "Create a new link and invalidate the previous one", onclick: () => newOutputLink(p.id)}, "New link"),
+          el("button", {onclick: async () => {
+            try { await post(`players/${p.id}/command`, {op: "forget"}); toast("Browser output link revoked."); }
+            catch (error) { toast(error.message); }
+          }}, "Revoke")) : null);
+      card.addEventListener("dragstart", (ev) => {
+        if (ev.target.closest("input")) { ev.preventDefault(); return; }
+        state.drag = {output: p.id};
+        ev.dataTransfer.effectAllowed = "copy";
+        ev.dataTransfer.setData("text/plain", p.name);
+        $("menu-backdrop").hidden = true;
+        $("settings-panel").style.pointerEvents = "none";
+      });
+      row?.card.replaceWith(card);
+      row = {card, toggle, signature}; deviceCards.set(p.id, row);
+    }
+    const {card, toggle} = row;
+    card.classList.toggle("attached", checked);
+    card.classList.toggle("offline", !p.available);
+    card.draggable = p.adopted && p.available;
+    toggle.disabled = !state.playersReady || !p.adopted || (!p.available && !checked);
+    toggle.setAttribute("aria-pressed", String(checked));
+    toggle.setAttribute("aria-label", `${checked ? "Deselect" : "Select"} ${p.id === me ? "this browser" : p.name}`);
+    toggle.querySelector(".output-icon").textContent = checked ? "◉" : "○";
+    toggle.querySelector(".device-info span").textContent = p.kind === "web-sink" ? `Web sink · ${sessionCount(p.receivers)}` : !p.connected ? checked ? "Offline · selected" : "Offline" : checked ? "Selected" : "Available";
+    const slider = card.querySelector(".output-volume input");
+    if (slider) {
+      slider.disabled = !state.playersReady || !p.connected || !checked;
+      if (volumePending.get(p.id) === p.volume.target) volumePending.delete(p.id);
+      if (!slider.matches(":active") && !volumePending.has(p.id)) {
+        slider.value = p.volume.target;
+        slider.setAttribute("aria-valuetext", volumeLabel(p.volume, p.volume.target));
+        card.querySelector(".output-volume output").textContent = p.volume.error || volumeLabel(p.volume, p.volume.level);
+      }
+    }
+    if (container.children[index] !== card) container.insertBefore(card, container.children[index] || null);
+  });
 }
 
 function showOutputLink(value) {
@@ -493,6 +605,7 @@ $("play").addEventListener("click", () => cmd("toggle"));
 $("stop").addEventListener("click", () => cmd("stop"));
 $("prev").addEventListener("click", () => cmd("prev"));
 $("next").addEventListener("click", () => cmd("next"));
+$("repeat").addEventListener("click", () => cmd("repeat", { repeat: !player()?.repeat }));
 $("seek").addEventListener("change", (ev) => cmd("seek", { position: Number(ev.target.value) }));
 $("clear").addEventListener("click", () => cmd("clear"));
 
@@ -606,7 +719,7 @@ function albumNode(a) {
 }
 
 function folderNode(d) {
-  const node = { label: d.name, folder: true, meta: "Folder", path: d.path,
+  const node = { label: d.name, folder: true, path: d.path,
     open: () => navigateFolder(d.path),
     tracks: () => folderTracks(d.path, node) };
   return node;

@@ -1,0 +1,28 @@
+name: OpenWrt images
+
+on:
+  push:
+    tags: ['*']
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [rpi-3, cubietruck]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: player/openwrt/build.sh ${{ matrix.profile }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-${{ matrix.profile }}
+          path: dist/openwrt/${{ matrix.profile }}/
+          if-no-files-found: error
+          compression-level: 0

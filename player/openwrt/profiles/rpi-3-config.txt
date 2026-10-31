@@ -1,0 +1,11 @@
+# Slopify speaker: HiFiBerry DAC2 HD, with HDMI and 3.5 mm selectable; no Wi-Fi or Bluetooth.
+# Keep one sound board overlay: hifiberry-dacplus-std for a DAC+ or Amp2.
+dtparam=audio=on
+dtoverlay=hifiberry-dacplushd
+dtoverlay=disable-wifi
+dtoverlay=disable-bt
+# Bare encoder: A=BCM23, B=BCM24, push=BCM25, commons=GND; kernel pull-ups.
+#dtoverlay=rotary-encoder,pin_a=23,pin_b=24,relative_axis=1,linux_axis=0
+#dtoverlay=gpio-key,gpio=25,active_low=1,gpio_pull=up,keycode=164,label=SlopifyPlayPause
+# IR output on BCM17. Not on a Beocreate, where BCM17 resets the DSP.
+#dtoverlay=gpio-ir-tx,gpio_pin=17

@@ -1,0 +1,100 @@
+#!/bin/sh /etc/rc.common
+# Slopify device player. The pairing token and local source settings persist
+# in /etc/slopify-player because /var is tmpfs on OpenWrt.
+
+START=90
+STOP=10
+USE_PROCD=1
+
+. /usr/libexec/slopify/common.sh
+
+start_service() {
+	local server card name listen pulse esound upnp volume_control vmin vmax vinitial
+	local live_buffer rotary path key flag option default ir_device value
+	config_load slopify
+	config_get server player server
+	config_get listen player local_listen ':8080'
+	config_get_bool pulse player pulse 1
+	config_get_bool esound player esound 0
+	config_get_bool upnp player upnp 0
+	config_get rotary player rotary_input
+	config_get live_buffer player live_buffer_ms
+	config_get ir_device player ir_device
+	config_get volume_control player volume_control
+	config_get vmin player volume_min 0
+	config_get vmax player volume_max 40
+	config_get vinitial player volume_initial 20
+
+	if [ -z "$server" ] && [ -z "$listen" ]; then
+		echo "slopify: set slopify.player.server or local_listen" >&2
+		return 1
+	fi
+	card="$(slopify_card)"
+	name="$(slopify_name)"
+	mkdir -p "$SLOPIFY_STATE"
+	chown nobody:audio "$SLOPIFY_STATE"
+	chmod 0700 "$SLOPIFY_STATE"
+	# Lets the sound hotplug handler follow a card change.
+	mkdir -p "$SLOPIFY_RUN"
+	printf '%s\n' "$card" > "$SLOPIFY_RUN/player-card"
+
+	procd_open_instance
+	procd_set_param command /usr/bin/slopify-player \
+		-local-state="$SLOPIFY_STATE/local-audio.json"
+	if [ -n "$listen" ]; then
+		procd_append_param command -local-listen="$listen" -local-source-control
+		[ "$pulse" = 1 ] && procd_append_param command -pulse-listen=:4713
+		[ "$esound" = 1 ] && procd_append_param command -esound-listen=:16001
+		[ "$upnp" = 1 ] && procd_append_param command -upnp-listen=:49494
+	else
+		pulse=0
+	fi
+	if [ -n "$card" ]; then
+		procd_set_param env SLOPIFY_OUTPUT="alsa:hw:CARD=$card,DEV=0"
+	else
+		procd_set_param env SLOPIFY_OUTPUT=null
+	fi
+	if [ -n "$volume_control" ] && [ -n "$card" ]; then
+		procd_append_param command -volume-control="$volume_control" \
+			-volume-card="$card" -volume-min="$vmin" \
+			-volume-max="$vmax" -volume-initial="$vinitial"
+	fi
+	[ -n "$live_buffer" ] && procd_append_param command -live-device-buffer-ms="$live_buffer"
+	slopify_grant_devices
+	# A volume control and IR are alternatives, and the mixer wins. The knob
+	# needs one of them to turn.
+	[ -n "$volume_control" ] && ir_device=
+	[ -n "$volume_control$ir_device" ] && [ -n "$rotary" ] && procd_append_param command -rotary-input="$rotary"
+	for option in playpause:button:164 previous:previous:165 next:next:163 mute:mute:113; do
+		default="${option##*:}"
+		option="${option%:*}"
+		config_get path player "${option%:*}_input"
+		config_get key player "${option%:*}_key"
+		flag="${option#*:}"
+		[ -n "$path" ] && procd_append_param command "-$flag-input=$path:${key:-$default}"
+	done
+	if [ -n "$ir_device" ]; then
+		procd_append_param command -ir-device="$ir_device" -ir-state="$SLOPIFY_STATE/ir-amp.json"
+		for option in address volume_up volume_down power_on power_off sweep; do
+			config_get value player "ir_$option"
+			flag="$(printf '%s' "$option" | tr _ -)"
+			[ -n "$value" ] && procd_append_param command "-ir-$flag=$value"
+		done
+	fi
+	procd_append_param env SLOPIFY_SERVER="$server" SLOPIFY_NAME="$name" \
+		SLOPIFY_TOKEN_FILE="$SLOPIFY_STATE/token" SLOPIFY_PULSE_SINK=slopify.output \
+		HOME="$SLOPIFY_STATE" SLOPIFY_PULSE_ENABLED="$pulse" SLOPIFY_AIRPLAY_ENABLED=0 \
+		GOMEMLIMIT=64MiB
+	procd_set_param user nobody
+	# The base system gives audio devices to this group.
+	procd_set_param group audio
+	procd_set_param limits rtprio="88 88"
+	procd_set_param respawn 3600 3 0
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+service_triggers() {
+	procd_add_reload_trigger slopify system
+}

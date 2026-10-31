@@ -1,0 +1,37 @@
+name: Player binaries
+
+on:
+  push:
+    tags: ['*']
+
+permissions:
+  contents: read
+
+jobs:
+  binary:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-amd64, goarch: amd64 }
+          - { name: linux-386, goarch: "386" }
+          - { name: linux-arm64, goarch: arm64 }
+          - { name: linux-armv7, goarch: arm, goarm: "7" }
+          - { name: linux-armv6, goarch: arm, goarm: "6" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build -trimpath -ldflags='-s -w' -o "dist/slopify-player-${{ matrix.name }}" ./player
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slopify-player-${{ matrix.name }}
+          path: dist/slopify-player-${{ matrix.name }}
+          if-no-files-found: error

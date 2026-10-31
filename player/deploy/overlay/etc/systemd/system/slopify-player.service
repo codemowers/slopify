@@ -1,0 +1,36 @@
+[Unit]
+Description=Slopify network audio player
+Wants=network-online.target
+After=network-online.target sound.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=slopify-player
+Group=slopify-player
+SupplementaryGroups=audio
+EnvironmentFile=/etc/default/slopify-player
+# install.sh sets the flags in slopify-player.service.d/10-local.conf.
+ExecStart=/usr/local/bin/slopify-player
+Restart=on-failure
+RestartSec=3
+LimitRTPRIO=88
+LimitMEMLOCK=67108864
+StateDirectory=slopify-player
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+DevicePolicy=closed
+DeviceAllow=char-alsa rw
+DeviceAllow=char-input r
+
+[Install]
+WantedBy=multi-user.target

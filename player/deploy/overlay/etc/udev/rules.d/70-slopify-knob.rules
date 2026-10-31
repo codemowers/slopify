@@ -1,0 +1,2 @@
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="rotary@17", SYMLINK+="input/slopify-rotary", GROUP="slopify-player", MODE="0640"
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="button@19", SYMLINK+="input/slopify-button", GROUP="slopify-player", MODE="0640"

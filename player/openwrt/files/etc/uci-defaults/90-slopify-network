@@ -1,0 +1,20 @@
+# Speaker on an existing wired LAN: DHCP/DHCPv6 client on the Ethernet bridge,
+# never a DHCP or RA server, and every radio disabled.
+uci -q batch <<-UCI
+	set network.lan.proto='dhcp'
+	delete network.lan.ipaddr
+	delete network.lan.netmask
+	delete network.lan.ip6assign
+	set network.lan6=interface
+	set network.lan6.device='@lan'
+	set network.lan6.proto='dhcpv6'
+	set network.lan6.reqprefix='no'
+	set dhcp.lan.ignore='1'
+	set dhcp.lan.dhcpv6='disabled'
+	set dhcp.lan.ra='disabled'
+UCI
+for radio in $(uci -q show wireless | sed -n 's/^wireless\.\([^.=]*\)=wifi-device$/\1/p'); do
+	uci set "wireless.$radio.disabled=1"
+done
+uci commit
+exit 0

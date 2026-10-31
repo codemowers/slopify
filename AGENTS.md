@@ -55,14 +55,188 @@ SlimProto, LAN discovery, extra public ports or per-device LoadBalancers.
 | indexer | `cmd/indexer` | Only writer to the media tree; UID/GID 1000. Probes files, watches changes, writes sidecars, publishes library events. |
 | catalog | `cmd/catalog` | Read-only media; builds an in-memory searchable catalog from sidecars. |
 | streamer | `cmd/streamer` | Read-only media; serves signed originals using HTTP range requests. |
-| players | `cmd/players` | Per-user queues, output selection, pairing and playback state; persists `/data/players.json`. No media mount. |
+| players | `player/s` | Per-user queues, output selection, pairing and playback state; persists `/data/players.json`. No media mount. |
 | frontend | `cmd/frontend`, `web/` | Static UI and OIDC login/token renewal. No API proxy or BFF. |
 | transcoder | `cmd/transcoder` | Per-profile HTTP workers fetching signed originals. No media mount. |
-| device player | `cmd/player` | Fetches originals, decodes audio with ffmpeg, plays through ALSA. |
+| device player | `player/` | Plays originals and LAN senders directly to ALSA, runs under systemd. Decodes FLAC, WAV and MP3 itself; other codecs use mpv. |
 
 The gateway was removed. Do not restore forwarded-user-header authentication or
 route all APIs through frontend. An enricher and S3 backend are future work,
 not implemented components.
+
+The device player is for music: audio-video sync and gaming are not priorities, so don't
+trade quality or reliability for lower latency. Device-player priorities are (1) lossless, native-rate playback of Slopify
+originals, including full decoded precision, and (2) laptop audio over the LAN.
+Lossless 16/24-to-32 packing is allowed; silently resampling originals or reducing
+S32 to float32 precision is not. Sender desktop mixes are a different guarantee:
+report their actual received format and further conversion. Receiver breadth is
+secondary. See the project goals in the local
+network audio design.
+
+`player/localui.go`, `localsources.go` and embedded `player/ui/` serve an
+opt-in trusted-LAN speaker UI (`-local-listen`), with status/SSE, sender setup,
+hardware volume/native playback-switch mute, and opt-in source
+selection (`-local-source-control`).
+There is no login; mutations require same-origin JSON and a custom header.
+Keep startup/buffering status inside the Slopify source card and omit its local
+hostname. PCM labels use a shared renderer: ALSA spellings normalize to abbreviations
+such as S32LE, with precision, signedness and byte order in tooltips. Hardware controls belong in the amplifier box; use a standalone Output
+section only when source control is unavailable. Source cards expose descriptive metadata as key: value lines: queue entry fields
+for Slopify, bounded allowlisted media properties for LAN streams. The UI hides
+technical queue fields from this list because format is summarized separately. Never include
+file paths, stream URLs or arbitrary application properties; render text only.
+Source settings use expected revisions. Local UI mutations have an eight-second
+deadline and are never replayed automatically; a timeout does not prove the
+command was rejected. Speaker tabs share one background SSE connection via SharedWorker where
+available, with a direct EventSource fallback; visibility does not disconnect
+status. Start the connection after document load and release the tab port on
+pagehide; the worker closes SSE only after the final tab leaves.
+Pinned sources disable automatic selection and its silence/sound guard. Hardware
+volume and native mute live in the amplifier box when supported. The Sources diagram also holds output
+format; clipboard fallback supports LAN HTTP. Off pins the selected source; Recent
+uses a −60 dBFS threshold, a persisted 0–2000 ms sustained-sound guard (default
+500 ms, Recent only), and two-second silence hold; Priority follows the
+persisted card order and holds the selected source through silence/node gaps
+for prioritySilenceMs (0–120000, default 30000), independently of the Recent guard.
+Expose a fallback target/deadline only during this hold with a fresh sounding
+lower-priority candidate; render its countdown using server time from SSE. `switchNow` validates the
+current revision and fresh pending fallback, expires the old silence hold,
+and selects that fallback without pinning. Explicit paused queue state is
+tracked independently from decoder buffering/idle and bypasses automatic
+silence/startup holds; a manual pin still wins.  Missing meter data is unknown, not silence; preserve
+recency across meter recreation. Click pins, drag reorders, and keyboard
+alternatives remain.
+The bounded registry reserves Slopify plus seven LAN slots, admits the newest session per peer, retains disconnected
+peers, and stores policy in `-local-state` (empty means memory only). Never use
+sender names as authentication or unbounded metric labels. Show source IP/title
+only in local status, never tokens or signed URLs. Keep receiver inventory and
+arbitration out of cloud APIs; external-source availability reporting is deferred.
+
+A pinned source retains a dashed connection line while disconnected or buffering,
+becoming solid when its amplifier link is active. The sender setup uses Zeroconf
+native and Fixed tabs without an outer panel. AirPlay appears only with
+`-local-airplay`, indicating a configured receiver (not a health check); nothing
+provides one until the AirPlay bridge exists. mpv cache stalls report
+buffering in the source card as well as initial track loading.
+
+Automatic selection keeps the current source playing while Slopify buffers
+privately; startup alone never takes priority. Selection waits for fresh sound.
+A selected stream has a bounded three-second first-meter grace after playback
+readiness, and Priority's silence allowance starts at readiness or the last
+audible observation, whichever is later. Explicit pins still select immediately.
+
+Source switching closes the device, withdrawing whatever it still held, before the
+next source opens it at that source's own format.
+
+The local page puts automatic selection below the title divider, without an
+enclosing Sources panel. Source and amplifier cards use equal-width desktop
+columns and stack on narrow screens. Source charts are compact; the output
+chart stays taller. Pending spinners sit at the top right, with explanations
+replacing the stream state. Status lines use `2ch · 96kHz · S32LE · running`;
+tunnel IPs occupy their own line. The output box is titled with the ALSA PCM name, with its /dev node below. Source cards label their protocol like the output's eyebrow.
+The Slopify card title beside its padlock is the configured server hostname,
+without URL credentials, path or query; do not repeat it in the details.
+Sender instructions include per-user and system-wide persistent Pulse zeroconf
+discovery with copy buttons. System-wide configuration applies to each user
+session; it does not create a system audio daemon.
+
+The local page heading and browser title use SLOPIFY_NAME (hostname fallback).
+Hide the connected-status message but retain failure feedback. Use HiFiBerry
+capitalization in display names while preserving lowercase system IDs.
+
+`playback.go` separates queue orchestration from backend/session lifecycle. The
+default `native` engine (`native.go`) decodes with `player/internal/audiodec`: integer-only
+FLAC, WAV and Q28 MP3 (`mp3tables_gen.go` generates its tables). Decoding must not use
+floating point; compare against ffmpeg in its tests. MP3 has no bit-exact definition,
+so its accuracy is a measured tolerance; intensity stereo and mixed blocks have no
+vectors yet. Output is `player/internal/alsa` (pure-Go ioctls, hw: devices, no conversion,
+exclusive use) or null. Mixer controls use the same package, never amixer. Verify with
+`SLOPIFY_TEST_ALSA_LOOPBACK=Loopback` on an idle snd-aloop card, and
+`SLOPIFY_TEST_ALSA_CONTROL=card:Name`, which only rewrites current values.
+
+The player has no PipeWire client, and the speaker runs no PipeWire. Don't restore it.
+AirPlay is unavailable: the planned bridge is shairport-sync's Pulse backend into
+`player/internal/pulse`, with a pure-Go receiver as the long-term option. `player/internal/pulse` is a
+playback-only Pulse native-protocol server with no resampling, mixing, DSP or floating-point maths; float32 from clients such as Chrome is unpacked with integer operations.
+`internal/esound` is an opt-in playback-only ESound server (`-esound-listen`), also
+unauthenticated: 8/16-bit mono/stereo streams only, paced by TCP backpressure, with no
+samples, recording or monitoring. `internal/upnp` plus `player/upnp_source.go` is an opt-in UPnP AV renderer (`-upnp-listen`)
+for controllers such as swyh-rs: SSDP replies, AVTransport, RenderingControl and
+ConnectionManager, without eventing or NOTIFY. It pulls FLAC, WAV/RF64 or raw L16/L24 over
+plain HTTP; dial-time checks keep streams on private addresses, redirects are refused and
+only the host is logged. `liveStream` lets all these protocols share source cards.
+`ir_amp.go` and `internal/lirc` drive a motorised amp knob over one-way IR (`-ir-device`), with
+NEC encoding left to the kernel through LIRC scancode mode. Position is only known by counting
+from a completed sweep to zero; any send failure makes it unknown, and it must never count up
+from an unknown position.
+Keep the Pulse start threshold reachable (below target minus minReq): otherwise a stream
+stalls after an underflow. PipeWire tunnels answer an underflow by rewinding and
+resending, heard as looping, so never read a live stream faster than real time
+(`nativeFillPacer`). Never report device delay in latency replies, and never buffer beyond what a tunnel asks: it steers reported latency plus its ring to 200 ms, and past that it drains the ring and sends silence, heard as steady ticks. For A/V sync, shrink the delay instead with `-live-device-buffer-ms`.
+`nativeRouter` owns the device: only the selected source writes, others keep real-time
+pace and stay metered. Sender keys are stable across addresses, so slots carry over.
+Hardware level changes move the slider of only the sender connected to the amp; a
+sender already at that level is left alone so that a drag never fights its echo.
+Each card shows its own "Buffer" at its bottom. Speaker `/metrics` (`native_metrics.go`)
+separates network, stream queue, device queue and scheduling; labels are bounded source
+slots, never sender names. Peak windows are stamped on the audio timeline and released
+once heard; the chart fills adjoining windows and leaves real gaps visible.
+
+mpv is the fallback for other codecs and a selectable engine: one headless subprocess
+across sessions with private inherited JSON IPC (no listener, URLs never in argv/logs).
+Commands and events are bounded; IPC failure discards the connection rather than
+replaying commands. Only one upcoming signed original is handed to it, within 30 seconds
+of the transition when duration is known. Force S32, unity volume and native rate;
+validate reported format at playback restart, not during transient reconfiguration.
+Use Ubuntu's mpv package. It opens ALSA itself, outside `nativeRouter`, so it can
+conflict with a LAN source over the device.
+
+`slopify-pulse-advertise.service` publishes the Pulse endpoint with
+avahi-publish-service, using SLOPIFY_NAME as service instance and description and
+slopify.hifiberry as the actual remote target. Keep using Avahi; it provides the exact
+friendly instance name. Advertise IPv4 to match the IPv4 Pulse binding. `player/internal/receiverconfig` shares `SLOPIFY_PULSE_ENABLED` and `SLOPIFY_AIRPLAY_ENABLED`
+deployment flags for the player setup UI. `player/airplay.go` accepts bounded loopback-only UDP
+Shairport metadata, allowlisting sender ID/name/software, IP and track tags;
+never expose Active-Remote credentials. A one-slot, 100 ms volume worker maps
+AirPlay -30..0 to the configured ALSA range; -144 uses native mute (minimum
+level fallback without a playback switch). Keep Shairport software gain unity.
+Sender metadata decorates the existing card; splitting cards
+and pushing knob changes back to AirPlay senders are not implemented.
+Discovery is not authentication. Keep manual IP
+tunnel instructions for routed networks; do not configure multicast reflection.
+
+Source selection and queue state remain distinct. The local source-pause worker
+coalesces selection intents independently of routing. Request a conditional
+pause only when selection transitions away from Slopify, never on each later
+Play, track change, or restored startup selection. Failed mutations are not
+replayed against newer playback decisions. Its cloud pause command is `pause-if-sole-output`; the server checks selected membership
+and playback revision under its queue lock. Multiple selected outputs keep
+playing (including this device's paced, unheard stream). Selecting Slopify never
+implicitly resumes a paused queue. No receiver inventory goes to the server.
+
+Everything specific to the device player lives in `player/`: the main package, its
+`internal/` packages, `deploy/`, `openwrt/` and `shairport/`. Server images never copy it.
+Only `internal/httpx` and `internal/volume` are shared with the servers.
+
+`player/openwrt/` builds Raspberry Pi 3 and Cubietruck images with the official Image
+Builder, adding a static player compiled outside it through `FILES=`. It runs as nobody with group audio. Keep it free of
+SDK builds and custom packages; images have no mpv, so FLAC, WAV and MP3 only. The LuCI
+panel is plain files under `files/`; `-list-audio` gives it cards and volume controls. Inputs are
+kernel names resolved by the player, with no input hotplug: init opens only configured devices.
+`.github/workflows/openwrt.yml` builds both as artifacts.
+
+`player/deploy/` is the supported Ubuntu 26.04 Pi install: `overlay/` mirrors the root
+filesystem and `install.sh` installs it with the player. Keep this directory free of
+private addresses and device names. The prohibition on committing `deploy/raspi` remains.
+
+Proposed device-local AirPlay, Ubuntu/Pulse-compatible, Android and Windows
+sources are described in `docs/design/local-network-audio.md`, including auth,
+source arbitration/pinning, precision release
+gates, Ubuntu setup, rotary actions, local UI and metrics. Its PipeWire engine was
+built and then removed, so treat those parts as history. This is a
+design proposal, not current functionality or authorization to expose new LAN
+ports. Keep its local receiver boundary separate from cloud service ingress;
+`deploy/raspi` remains an uncommitted experiment for later custom-image work.
 
 Ingress routes `/api/catalog` to catalog; `/api/players`, `/api/stream` and
 `/device` to players; `/stream/original` to streamer; `/stream/opus-128` and
@@ -123,6 +297,17 @@ Profile names include bitrate where applicable and are bound by URL signatures.
 - Devices generate their own pairing token, normally persisted at
   `/var/lib/slopify-player/token`. Server stores its SHA256 hash in player state
   and strips it from public responses. Devices need adoption in the web app.
+- Hardware pairing atomically binds a pending device to the authenticated user's
+  queue. Claimed devices are visible/selectable/manageable only by that owner.
+  Unclaimed devices remain discoverable to authenticated users (first claim wins).
+  ReportedName is device-local identity; default web Name is owner display name
+  plus ReportedName, while NameSet preserves a separate full web override.
+  Persist verified OwnerIssuer/OwnerSubject, strip both from public JSON. Migrate
+  legacy devices only from a unique selecting user queue; otherwise require pairing.
+  Current queue keys remain subject-only under one configured issuer. Do not add
+  multiple issuers or change issuer without an explicit account-state migration.
+  Federation and separate-IdP grants are proposed in `docs/design/federation.md`;
+  matching emails/names never link identities or confer speaker/library access.
 - Signed media URLs grant temporary access without OIDC cookies. Do not log
   their signatures, embed bearer tokens in exports or trust request Host as
   the canonical origin. PUBLIC_ORIGIN comes from the OIDC_CLIENT_ORIGIN secret
@@ -148,15 +333,28 @@ Profile names include bitrate where applicable and are bound by URL signatures.
   mutations and link creation are never replayed automatically. Cancel obsolete
   library reads and refresh the library after SSE reconnect. Cached app assets
   cover transient frontend errors; codec fallback must distinguish proxy outages.
+- Browser periodic progress reports run only while the document is visible;
+  foregrounding sends a fresh position. Playback events (including ended and
+  lock-screen controls) still report while hidden. This is not a guarantee
+  against mobile OS suspension or SSE disconnects.
 - Browser disconnects have a 30-second grace period before pausing the output.
   Retry transient network errors from the last played position, including
   Chrome's ERR_NETWORK_CHANGED; do not treat network failure as user pause.
+- On a current-entry change, centre the playing queue row in its own scroll
+  viewport where possible. Never steal keyboard focus or scroll on position-only
+  updates; respect reduced-motion preferences.
+- Repeat is a queue setting copied to outputs: `after`/`before` wrap, for automatic
+  advance and Next/Previous. Devices only prefetch up to the queue tail, so wrapping
+  restarts through the server rather than gaplessly.
 - Library + always appends to the queue tail. The append command ignores
   insertion hints; use insert for drag/drop placement and next-up for Play next.
 - Library rows have explicit add/play actions. Search toolbar defaults to the
   results; selecting a row targets that row. Cap additions at 300 tracks and
   deduplicate search results by path. Folder navigation uses breadcrumbs and
-  recursive folder additions, not a nested directory tree.
+  recursive folder additions, not a nested directory tree. Omit the redundant
+  “Folder” metadata label beside folder add buttons.
+- Link the web app’s Slopify header title to GitHub; keep the GitHub icon and
+  `codemowers/slopify` repository link in the local speaker UI footer.
 - Device/output selection, browser audio quality, appearance and nerd mode
   live in settings. Nerd mode is a third desktop column, stacked on narrow
   screens. Show source audio/video codecs in file tooltips.
@@ -164,7 +362,7 @@ Profile names include bitrate where applicable and are bound by URL signatures.
   on mobile. Preview has no duplicate title/transport/header buttons; clicking
   it opens native fullscreen controls. Output selection is top-right in the
   page header. Selected offline outputs stay visible, grayed out, and sync to
-  current queue state on return. Queue rows use selection and per-row
+  current queue state on return. Queue rows omit position numbers and use selection and per-row
   actions without checkboxes; coarse-pointer taps toggle selection.
 - Browser video tries originals when its audio codec is supported; rejected
   containers can fall back to MP4 with both codecs copied (`video-copy`).
@@ -174,8 +372,8 @@ Profile names include bitrate where applicable and are bound by URL signatures.
 - Transcoded/remuxed video uses fragmented MP4. Seeking opens a fresh stream
   with audio preroll aligned to a source video keyframe; it is approximate.
   Original streams use ordinary HTTP range seeking. Keep errors visible.
-- Devices always fetch originals, including video containers, and decode only
-  audio with `-map 0:a:0 -vn`. No video rendering in the Go device player.
+- Devices always fetch originals, including video containers, and play audio only
+  (mpv `--vid=no --aid=1`). No video rendering in the Go device player.
 - Preserve device sample rate and decoded precision. No resampling, software
   volume or lossy conversion. Lossless wider-word packing and mono duplication
   are allowed to match hardware. Unsupported sample rates are errors.
@@ -183,6 +381,31 @@ Profile names include bitrate where applicable and are bound by URL signatures.
 - Prefetch the next track for gapless device playback; reopen the DAC only on
   format changes and release it while paused. Preserve detached current entries
   in device queue views when the visible queue is cleared.
+- Device hardware volume is opt-in with `-volume-control` and `-volume-card`;
+  without flags, never read or set mixers. `-volume-min`, `-volume-max` and
+  `-volume-initial` use alsamixer's perceptual displayed 0–100 scale (defaults
+  0, 40, 20), not raw hardware-register levels. Map levels to hardware using
+  ALSA dB metadata; 20/40 on Amp2 correspond to roughly -42/-24 dB.
+  Set the initial level once per process start; poll local mixer changes each
+  second and enforce bounds. Advertise capabilities/dB steps on device SSE
+  connection and report observed levels, hardware dB and mute through `/device/v1/volume`. The players
+  service publishes them over SSE. Web volume readouts and accessible slider
+  text show only dB (−∞ dB for mute), never ALSA level numbers/control names.
+  Volume commands require the output's current account selection and use independent revisions; never alter playback versions
+  or queue state. Linux `-rotary-input`/`-button-input`/`-previous-input`/`-next-input`/`-mute-input` consume explicitly
+  configured evdev devices (REL_X and KEY_PLAYPAUSE), never scan keyboards.
+  Bare Amp2 encoder wiring: BCM23/24 rotation, BCM25 push, commons to GND;
+  rotary-encoder/gpio-key boot overlays provide pull-ups. Stable udev symlinks
+  grant read access only to these inputs. Device `/device/v1/control` permits
+  only version/entry-checked play/pause, next and previous of the queue selecting that device.
+- Local rotary actuation has a dedicated goroutine, separate from playback
+  commands/reports. Never wait for HTTP between detents. Volume reporting uses
+  a separate goroutine, one-slot notifications, current snapshots and 100 ms
+  coalescing; failed reports retry the latest state rather than historic levels.
+  Button delivery must not block rotation when playback/network control stalls.
+- Output selection uses icon buttons with `aria-pressed` and immediate feedback.
+  Serialize/coalesce rapid selection changes without replaying failed mutations;
+  update keyed device cards in place so playback SSE does not replace sliders.
 
 ## Shared browser output links
 
@@ -282,22 +505,25 @@ Profile names include bitrate where applicable and are bound by URL signatures.
 - Chart requires Passmower OIDCClient and Mittwald StringSecret controllers.
   Generated signing/session keys and queue state are persistent. Media may
   use hostPath or a PVC; only indexer mounts it read-write.
-- Per-service Dockerfiles in `build/` have explicit input copies to avoid
-  unrelated rebuilds. `.dockerignore` allows only build inputs. Cluster services
-  without ffmpeg use static Go binaries in scratch. Indexer/transcoder use
-  Alpine plus ffmpeg; native player target currently uses Debian plus ffmpeg
-  and ALSA utilities. The documented Docker run enforces a read-only
-  root filesystem, with a writable token volume. All builders use the same
-  per-service Dockerfiles in build/. Do not restore a generic root Dockerfile.
+- Per-service Dockerfiles in `build/` cover cluster services only, with explicit
+  input copies to avoid unrelated rebuilds. `.dockerignore` allows only build
+  inputs. Services without ffmpeg use static Go binaries in scratch.
+  Indexer/transcoder use Alpine plus ffmpeg. Do not restore a generic root
+  Dockerfile. `build/player.Dockerfile` builds the device player, which normally runs under systemd or procd; it has no mpv.
+- `go.mod` targets Go 1.27.1.
+- Experimental, uncommitted Pi service/configuration files live in `deploy/raspi/`: a generic
+  systemd unit, explicit Amp2 volume/rotary drop-in, udev input permissions,
+  headless boot snippet/configurator and static Ethernet example. Installer
+  restarts only the player; boot and network changes are separate, never an
+  automatic reboot. Keep real server/IP settings in gitignored
+  `deploy/raspi/local/`; never version pairing tokens or compiled player binaries.
+  Do not commit this experiment; the supported install is `player/deploy`.
 - Demo: `deploy/build.sh` uses Kaniko in `$KUBE_CONTEXT`/`$NAMESPACE` and
   `chart/values-demo.yaml`. It uploads context as a ConfigMap, avoiding
   `kubectl exec`. Partial builds change only selected deployment images.
-  `deploy/seed.yaml` seeds sample media; `deploy/testplayers` has null outputs.
+  `deploy/seed.yaml` seeds sample media.
   Browser playback mechanics have focused Node tests in web/media.test.mjs;
   do not recreate legacy tests that forge gateway cookies or mount session keys.
-- No ready-made Pi/Cubietruck SD-card images are built. OpenWrt is a possible
-  appliance base, not an implemented distribution. Persistent pairing tokens
-  would need `/etc` rather than volatile `/var` there.
 
 | Environment | Components | Default / purpose |
 |---|---|---|
@@ -314,7 +540,8 @@ Profile names include bitrate where applicable and are bound by URL signatures.
 | `TRANSCODE_CONCURRENCY` | transcoder | `2` |
 | `INDEXER_PROBE_WORKERS`, `INDEXER_REPROBE` | indexer | `2`, `false` |
 | `STATE_FILE` | players | `/data/players.json` |
-| `SLOPIFY_SERVER`, `SLOPIFY_NAME`, `SLOPIFY_OUTPUT` | device | required URL, hostname, `aplay:hw:0,0` |
+| `SLOPIFY_SERVER`, `SLOPIFY_NAME`, `SLOPIFY_OUTPUT` | device | URL (empty with `-local-listen`: LAN sources only), hostname, `aplay:hw:0,0` |
+| `SLOPIFY_MPV` | device | `mpv` |
 | `SLOPIFY_TOKEN_FILE` or `SLOPIFY_TOKEN` | device | persistent token file or explicit token |
 
 Use `SLOPIFY_OUTPUT=null` for a device without audio hardware. Server health

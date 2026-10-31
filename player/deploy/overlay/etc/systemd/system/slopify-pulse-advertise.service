@@ -1,0 +1,19 @@
+[Unit]
+Description=Advertise the Slopify Pulse receiver over mDNS
+After=avahi-daemon.service slopify-player.service
+Requires=avahi-daemon.service
+BindsTo=slopify-player.service
+
+[Service]
+User=slopify-player
+EnvironmentFile=/etc/default/slopify-player
+ExecStart=/usr/bin/avahi-publish-service --no-fail "${SLOPIFY_NAME}" _pulse-sink._tcp 4713 device=slopify.hifiberry "description=${SLOPIFY_NAME}" format=s32le rate=48000 channels=2 channel_map=front-left,front-right
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=slopify-player.service

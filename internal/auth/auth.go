@@ -14,6 +14,11 @@ import (
 )
 
 type userKey struct{}
+type principalKey struct{}
+type Principal struct{ Issuer, Subject, Name string }
+
+func User(r *http.Request) Principal { p, _ := r.Context().Value(principalKey{}).(Principal); return p }
+
 type Authorizer struct{ verifier *oidc.IDTokenVerifier }
 
 func New(ctx context.Context) (*Authorizer, error) {
@@ -46,8 +51,10 @@ func (a *Authorizer) Require(scope func(*http.Request) string, next http.Handler
 			return
 		}
 		var claims struct {
-			Scope     string `json:"scope"`
-			NotBefore int64  `json:"nbf"`
+			Name              string `json:"name"`
+			PreferredUsername string `json:"preferred_username"`
+			Scope             string `json:"scope"`
+			NotBefore         int64  `json:"nbf"`
 		}
 		if token.Claims(&claims) != nil || claims.NotBefore > time.Now().Unix() {
 			invalid(w)
@@ -63,6 +70,14 @@ func (a *Authorizer) Require(scope func(*http.Request) string, next http.Handler
 		r.Header.Del("X-Slopify-User")
 		ctx, cancel := context.WithDeadline(r.Context(), token.Expiry)
 		defer cancel()
+		name := claims.Name
+		if name == "" {
+			name = claims.PreferredUsername
+		}
+		if name == "" {
+			name = token.Subject
+		}
+		ctx = context.WithValue(ctx, principalKey{}, Principal{Issuer: token.Issuer, Subject: token.Subject, Name: name})
 		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, userKey{}, token.Subject)))
 	})
 }

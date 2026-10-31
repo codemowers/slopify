@@ -1,0 +1,5 @@
+# Only the stock name: sysupgrade keeps a chosen one, and this runs again.
+[ "$(uci -q get system.@system[0].hostname)" = OpenWrt ] || exit 0
+uci set system.@system[0].hostname='slopify'
+uci commit system
+exit 0

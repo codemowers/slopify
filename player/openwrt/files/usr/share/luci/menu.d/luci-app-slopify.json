@@ -1,0 +1,12 @@
+{
+	"admin/services/slopify": {
+		"title": "Slopify player",
+		"action": {
+			"type": "view",
+			"path": "slopify/player"
+		},
+		"depends": {
+			"acl": [ "luci-app-slopify" ]
+		}
+	}
+}

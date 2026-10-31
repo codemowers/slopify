@@ -1,0 +1,20 @@
+#!/bin/sh
+# Sound cards, volume controls and input devices for the LuCI panel, as JSON.
+. /usr/libexec/slopify/common.sh
+inputs=
+for dir in /sys/class/input/event*; do
+	[ -r "$dir/device/name" ] || continue
+	read -r name < "$dir/device/name"
+	# Keyboards are left out: by name, or by having keys below 64 (letters).
+	case "$name" in *[Kk]eyboard*) continue ;; esac
+	read -r keys < "$dir/device/capabilities/key" 2>/dev/null
+	case "${keys##* }" in 0|"") ;; *) continue ;; esac
+	name="$(printf '%s' "$name" | tr -d '"\\')"
+	inputs="$inputs${inputs:+,}\"$name\""
+done
+lirc=
+for device in /dev/lirc[0-9]*; do
+	[ -c "$device" ] && lirc="$lirc${lirc:+,}\"$device\""
+done
+printf '{"auto":"%s","cards":%s,"inputs":[%s],"lirc":[%s]}\n' \
+	"$(slopify_auto_card)" "$(/usr/bin/slopify-player -list-audio)" "$inputs" "$lirc"

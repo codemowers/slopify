@@ -112,8 +112,11 @@ $("output-video").addEventListener("keydown", (event) => {
 engine.on("ended", () => report({ended: true}));
 setInterval(() => {
   if (state) $("output-position").textContent = `${clock(engine.position())} / ${clock(currentEntry(state)?.duration)}`;
-  if (!engine.element.paused && !engine.blocked) report();
+  if (document.visibilityState === "visible" && !engine.element.paused && !engine.blocked) report();
 }, 5000);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && !engine.element.paused && !engine.blocked) report();
+});
 
 async function connect() {
   let delay = 1000;

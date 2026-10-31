@@ -63,7 +63,7 @@ func TestQueueFollowsUserAcrossBrowsersAndDevices(t *testing.T) {
 	if err := s.userCommand("alice", command{Op: "pause"}); err != nil {
 		t.Fatal(err)
 	}
-	s.players["dac"] = &Player{ID: "dac", Kind: Device, Adopted: true, Connected: true, State: Stopped, UpdatedAt: time.Now()}
+	s.players["dac"] = &Player{ID: "dac", Kind: Device, Owner: queueID("alice"), Adopted: true, Connected: true, State: Stopped, UpdatedAt: time.Now()}
 	if err := s.userCommand("alice", command{Op: "transfer", To: "dac"}); err != nil {
 		t.Fatal(err)
 	}
@@ -244,5 +244,50 @@ func TestExistingQueueCorruptTagsUseFilename(t *testing.T) {
 	cleanEntryText(&entry)
 	if entry.Title != "Härra Sannikov" || entry.Artist != "Dagö" || entry.Album != "Keep this valid album" {
 		t.Fatalf("incorrect queue metadata fallback: %+v", entry)
+	}
+}
+
+func TestRepeatWrapsQueueAndPersistsOnOutputs(t *testing.T) {
+	s := queueStore()
+	defer addBrowser(t, s, "alice", "web")()
+	tracks := []Entry{{Path: "a.flac", Title: "A"}, {Path: "b.flac", Title: "B"}}
+	if err := s.userCommand("alice", command{Op: "replace", Tracks: tracks}); err != nil {
+		t.Fatal(err)
+	}
+	web := s.players["web"]
+	first, last := web.Queue[0].ID, web.Queue[1].ID
+	end := func() {
+		t.Helper()
+		if err := s.report("web", report{Version: web.Version, Entry: web.Current, Ended: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	end()
+	if web.Current != last || web.State != Playing {
+		t.Fatalf("did not advance: %+v", web)
+	}
+	if err := s.userCommand("alice", command{Op: "repeat", Repeat: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !web.Repeat || web.Current != last || web.State != Playing {
+		t.Fatalf("repeat changed playback or did not reach the output: %+v", web)
+	}
+	end()
+	q := s.players[queueID("alice")]
+	if web.Current != first || web.State != Playing || q.Current != first || !q.Repeat {
+		t.Fatalf("did not wrap: output %+v queue %+v", web, q)
+	}
+	if err := s.userCommand("alice", command{Op: "prev"}); err != nil {
+		t.Fatal(err)
+	}
+	if q.Current != last {
+		t.Fatalf("previous did not wrap: %+v", q)
+	}
+	if err := s.userCommand("alice", command{Op: "repeat", Repeat: false}); err != nil {
+		t.Fatal(err)
+	}
+	end()
+	if web.State != Stopped {
+		t.Fatalf("stopped repeating but kept playing: %+v", web)
 	}
 }

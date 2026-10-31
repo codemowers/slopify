@@ -25,6 +25,7 @@ import (
 	"github.com/codemowers/slopify/internal/media"
 	"github.com/codemowers/slopify/internal/profiles"
 	"github.com/codemowers/slopify/internal/signedurl"
+	"github.com/codemowers/slopify/internal/volume"
 )
 
 var browserID = regexp.MustCompile(`^web-[a-z0-9]{8,40}$`)
@@ -55,6 +56,7 @@ func main() {
 	web := http.NewServeMux()
 	// Browser APIs verify their own access tokens below.
 	web.HandleFunc("GET /api/players", func(w http.ResponseWriter, r *http.Request) {
+		s.rememberOwner(auth.User(r))
 		httpx.JSON(w, s.snapshotFor(auth.Subject(r)))
 	})
 	web.HandleFunc("GET /api/players/events", s.browserEvents)
@@ -65,7 +67,8 @@ func main() {
 		if !decode(w, r, &c) {
 			return
 		}
-		respond(w, s.webCommand(auth.Subject(r), r.PathValue("id"), c))
+		s.rememberOwner(auth.User(r))
+		respond(w, s.webCommandFor(auth.User(r), r.PathValue("id"), c))
 	})
 	web.HandleFunc("POST /api/players/{id}/report", func(w http.ResponseWriter, r *http.Request) {
 		var rep report
@@ -122,6 +125,22 @@ func main() {
 
 	s.registerLinkRoutes(mux)
 
+	mux.HandleFunc("POST /device/v1/control", func(w http.ResponseWriter, r *http.Request) {
+		id, _, ok := device(w, r)
+		var control deviceControl
+		if !ok || !decode(w, r, &control) {
+			return
+		}
+		respond(w, s.deviceControl(id, control))
+	})
+	mux.HandleFunc("POST /device/v1/volume", func(w http.ResponseWriter, r *http.Request) {
+		id, _, ok := device(w, r)
+		var rep volume.Report
+		if !ok || !decode(w, r, &rep) {
+			return
+		}
+		respond(w, s.volumeReport(id, rep))
+	})
 	// For devices, authenticated by the token each device generated.
 	mux.HandleFunc("GET /device/v1/events", s.deviceEvents)
 	mux.HandleFunc("POST /device/v1/report", func(w http.ResponseWriter, r *http.Request) {
@@ -202,6 +221,7 @@ func device(w http.ResponseWriter, r *http.Request) (id, hash string, ok bool) {
 // browserEvents streams a snapshot of all outputs and then every change. A
 // tab passing its own browser output ID keeps that output online meanwhile.
 func (s *store) browserEvents(w http.ResponseWriter, r *http.Request) {
+	s.rememberOwner(auth.User(r))
 	updates, cancel := s.hub.Subscribe()
 	defer cancel()
 	if id := r.URL.Query().Get("player"); id != "" {
@@ -230,7 +250,15 @@ func (s *store) browserEvents(w http.ResponseWriter, r *http.Request) {
 		s.attachUser(auth.Subject(r), id)
 	}
 	send := events.Stream(w)
-	if !send("snapshot", s.snapshotFor(auth.Subject(r))) {
+	snapshot := s.snapshotFor(auth.Subject(r))
+	visible := map[string]bool{}
+	for _, raw := range snapshot {
+		var p Player
+		if json.Unmarshal(raw, &p) == nil {
+			visible[p.ID] = true
+		}
+	}
+	if !send("snapshot", snapshot) {
 		return
 	}
 	ping := time.NewTicker(keepalive)
@@ -249,16 +277,29 @@ func (s *store) browserEvents(w http.ResponseWriter, r *http.Request) {
 			}
 			if m.Type == "player" {
 				var p Player
-				if json.Unmarshal(m.Player, &p) != nil || !s.visiblePlayer(auth.Subject(r), &p) {
+				if json.Unmarshal(m.Player, &p) != nil {
 					continue
 				}
+				if !s.visiblePlayer(auth.Subject(r), &p) {
+					if visible[p.ID] {
+						delete(visible, p.ID)
+						if !send("removed", message{Type: "removed", ID: p.ID}) {
+							return
+						}
+					}
+					continue
+				}
+				visible[p.ID] = true
 				if p.Kind == Device {
 					p.Queue = nil
 					p.CurrentEntry = nil
 					m.Player, _ = json.Marshal(&p)
 				}
-			} else if strings.HasPrefix(m.ID, "user-") && m.ID != queueID(auth.Subject(r)) {
-				continue
+			} else {
+				if !visible[m.ID] {
+					continue
+				}
+				delete(visible, m.ID)
 			}
 			if !send(m.Type, m) {
 				return
@@ -280,6 +321,13 @@ func (s *store) deviceEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name is required", http.StatusBadRequest)
 		return
 	}
+	var control *volume.Control
+	if raw := q.Get("volume"); raw != "" {
+		if len(raw) > 16384 || json.Unmarshal([]byte(raw), &control) != nil || !control.Valid() {
+			http.Error(w, "invalid volume capability", 400)
+			return
+		}
+	}
 	var formats []string
 	if f := q.Get("formats"); f != "" {
 		formats = strings.Split(f, ",")
@@ -294,7 +342,7 @@ func (s *store) deviceEvents(w http.ResponseWriter, r *http.Request) {
 	updates, cancel := s.hub.Subscribe()
 	defer cancel()
 	detach, err := s.attach(id,
-		func() *Player { return &Player{Kind: Device, Name: name, TokenHash: hash} },
+		func() *Player { return &Player{Kind: Device, Name: name, ReportedName: name, TokenHash: hash} },
 		func(p *Player) error {
 			if p.Kind != Device || subtle.ConstantTimeCompare([]byte(p.TokenHash), []byte(hash)) != 1 {
 				return errForbidden
@@ -302,9 +350,16 @@ func (s *store) deviceEvents(w http.ResponseWriter, r *http.Request) {
 			if p.disconnect != nil {
 				p.disconnect() // a newer connection replaces an older one
 			}
-			if !p.NameSet {
-				p.Name = name
+			p.ReportedName = name
+			refreshDeviceName(p)
+			if control != nil {
+				revision := uint64(1)
+				if p.Volume != nil {
+					revision = p.Volume.Revision + 1
+				}
+				control.Revision, control.Target = revision, control.Level
 			}
+			p.Volume = control
 			p.Model, p.Formats, p.Address, p.disconnect = model, formats, address, disconnect
 			return nil
 		})

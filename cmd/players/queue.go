@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/codemowers/slopify/internal/auth"
 	"slices"
 	"time"
 )
@@ -35,7 +36,7 @@ func (s *store) copyPlayback(to, from *Player) {
 		to.CurrentEntry = &copy
 	}
 	to.Current, to.NextID = from.Current, from.NextID
-	to.Blocked = from.Blocked
+	to.Blocked, to.Repeat = from.Blocked, from.Repeat
 	to.setPos(s.pos(from), from.State)
 }
 
@@ -135,7 +136,7 @@ func (s *store) setOutputs(q *Player, ids []string) error {
 		if !p.available() && !slices.Contains(queueOutputs(q), id) {
 			return fmt.Errorf("%w: output is offline", errBadRequest)
 		}
-		if (p.Kind == Browser || p.Kind == WebSink) && p.Owner != q.ID {
+		if (p.Kind == Browser || p.Kind == WebSink || p.Kind == Device) && p.Owner != q.ID {
 			return errForbidden
 		}
 		if other := s.outputQueue(id); other != nil && other != q {
@@ -205,24 +206,59 @@ func (s *store) attachUser(subject, browser string) {
 }
 
 func (s *store) webCommand(subject, id string, c command) error {
-	if id == "me" {
-		return s.userCommand(subject, c)
+	return s.webCommandFor(auth.Principal{Subject: subject, Name: subject}, id, c)
+}
+func (s *store) webCommandFor(user auth.Principal, id string, c command) error {
+	if user.Subject == "" {
+		return errForbidden
 	}
-	// Browser/device records are now outputs; playlist edits use the account queue.
-	if c.Op != "adopt" && c.Op != "rename" && c.Op != "forget" {
+	if id == "me" {
+		return s.userCommand(user.Subject, c)
+	}
+	if c.Op != "adopt" && c.Op != "rename" && c.Op != "forget" && c.Op != "volume" {
 		return errBadRequest
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	p := s.players[id]
-	forbidden := p == nil || p.Kind == User || ((p.Kind == Browser || p.Kind == WebSink) && p.Owner != queueID(subject))
-	if q := s.outputQueue(id); q != nil && q.ID != queueID(subject) {
-		forbidden = true
-	}
-	s.mu.Unlock()
-	if forbidden {
+	owner := queueID(user.Subject)
+	if p == nil || p.Kind == User || (p.OwnerIssuer != "" && p.OwnerIssuer != user.Issuer) {
 		return errForbidden
 	}
-	return s.command(id, c)
+	if c.Op == "adopt" {
+		if p.Kind != Device || !p.Connected {
+			return errBadRequest
+		}
+		if p.Owner != "" && p.Owner != owner {
+			return errForbidden
+		}
+		if p.Adopted && p.Owner == owner {
+			return nil
+		}
+		p.Owner = owner
+		p.OwnerIssuer = user.Issuer
+		p.OwnerSubject = user.Subject
+		p.OwnerName = ownerDisplayName(user.Name)
+		p.Adopted = true
+		refreshDeviceName(p)
+		p.Version++
+		s.changed(p)
+		return nil
+	}
+	if p.Owner != owner {
+		return errForbidden
+	}
+	if q := s.outputQueue(id); q != nil && q.ID != owner {
+		return errForbidden
+	}
+	if c.Op == "volume" {
+		q := s.outputQueue(id)
+		if q == nil || q.ID != owner {
+			return errForbidden
+		}
+		return s.setVolume(p, c.Level)
+	}
+	return s.commandLocked(id, c)
 }
 
 func (s *store) browserReport(subject, id string, r report) error {
@@ -238,7 +274,7 @@ func (s *store) browserReport(subject, id string, r report) error {
 
 func (s *store) visiblePlayer(subject string, p *Player) bool {
 	return (p.Kind != User || p.ID == queueID(subject)) &&
-		((p.Kind != Browser && p.Kind != WebSink) || p.Owner == queueID(subject))
+		((p.Kind != Browser && p.Kind != WebSink && p.Kind != Device) || p.Owner == queueID(subject) || (p.Kind == Device && p.Owner == "" && !p.Adopted))
 }
 
 func (s *store) snapshotFor(subject string) []json.RawMessage {

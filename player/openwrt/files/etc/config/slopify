@@ -1,0 +1,51 @@
+# The player name is the OpenWrt system description
+# (uci set system.@system[0].description='Kitchen'), falling back to the hostname.
+
+config player 'player'
+	# Slopify origin, for example https://slopify.example.com. Empty plays LAN
+	# sources only, and needs local_listen.
+	option server ''
+	# ALSA card ID from /proc/asound/cards. auto prefers a USB DAC, then the
+	# first card that is not HDMI or the Pi headphone jack, and follows USB DAC hotplug.
+	option card 'auto'
+	# Trusted-LAN speaker page and source selection. Empty disables both,
+	# along with the Pulse receiver.
+	option local_listen ':8080'
+	# Trusted-LAN Pulse receiver on TCP 4713, advertised over mDNS. No authentication.
+	option pulse '1'
+	# Trusted-LAN ESound receiver on TCP 16001. No authentication.
+	option esound '0'
+	# Trusted-LAN UPnP renderer on TCP 49494 and UDP 1900. No authentication.
+	option upnp '0'
+	# ALSA buffer for LAN sources in ms, 40 to 2000. Empty lets the device choose,
+	# 150 to 250. Lower keeps video closer to sound; too low underruns.
+	option live_buffer_ms ''
+	# Opt-in hardware volume (alsamixer displayed 0..100 scale). Leave empty
+	# to never read or set mixers. HiFiBerry Amp2: Digital, 0, 40, 20.
+	option volume_control ''
+	option volume_min '0'
+	option volume_max '40'
+	option volume_initial '20'
+	# Input devices by kernel name, such as rotary@17 and button@19 from the Pi
+	# knob overlays. Only devices named here are made readable to the player.
+	option rotary_input ''
+	# Each button is a device and an optional key code; the default key is
+	# play/pause 164, previous 165, next 163, mute 113.
+	option playpause_input ''
+	option playpause_key ''
+	option previous_input ''
+	option previous_key ''
+	option next_input ''
+	option next_key ''
+	option mute_input ''
+	option mute_key ''
+	# Motorised amp knob over IR, for example /dev/lirc0. Ignored while
+	# volume_control is set. Empty codes use the player's defaults.
+	option ir_device ''
+	option ir_address ''
+	option ir_volume_up ''
+	option ir_volume_down ''
+	option ir_power_on ''
+	option ir_power_off ''
+	# Time to hold volume down to reach zero, such as 6s.
+	option ir_sweep ''

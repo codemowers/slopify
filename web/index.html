@@ -14,7 +14,7 @@
 <body>
   <header>
     <button id="menu-toggle" class="menu-toggle" aria-label="Open menu and settings" aria-expanded="false" aria-controls="settings-panel">☰</button>
-    <span class="brand">Slopify</span>
+    <a class="brand" href="https://github.com/codemowers/slopify" target="_blank" rel="noopener noreferrer" aria-label="Slopify on GitHub">Slopify</a>
     <span class="header-caption">Your collection. Everywhere.</span>
     <span class="spacer"></span>
     <button id="library-toggle" class="library-toggle" aria-label="Browse library" aria-controls="library" aria-expanded="false">Library</button>
@@ -109,7 +109,7 @@
       </div>
       <div class="table-wrap">
         <table id="playlist">
-          <thead><tr><th class="c-num" scope="col">#</th><th>Title</th><th>Artist</th><th>Album</th><th class="c-len">Length</th><th class="c-actions"><span class="sr-only">Actions</span></th></tr></thead>
+          <thead><tr><th>Title</th><th>Artist</th><th class="c-album">Album</th><th class="c-len">Length</th><th class="c-actions"><span class="sr-only">Actions</span></th></tr></thead>
           <tbody></tbody>
         </table>
         <div id="pl-empty" class="empty">Nothing queued. Use “Add to queue” in your library. Clearing the queue keeps the current item playing.</div>
@@ -122,6 +122,7 @@
           <button id="play" aria-label="Play" title="Play/pause (Space)">▶</button>
           <button id="stop" aria-label="Stop" title="Stop (V)">⏹</button>
           <button id="next" aria-label="Next" title="Next (B)">⏭</button>
+          <button id="repeat" aria-label="Repeat queue" aria-pressed="false" title="Repeat queue when it ends">🔁</button>
         </div>
         <div class="now">
           <div id="now-title">Nothing playing</div>
