@@ -1,0 +1,17 @@
+# Shared demo behavior; target-specific settings live in values-demo.yaml.
+allowAllUsers: true
+frontendStrategy: Recreate
+nodeSelector:
+  kubernetes.io/arch: amd64
+persistentWorkloads: true
+players:
+  stateFile: /data/demo-players.json
+demoSeed:
+  enabled: true
+transcodes:
+  maxBytes: 0
+  profiles:
+    opus-128:
+      maxBytes: 0
+    mp3-192:
+      maxBytes: 0

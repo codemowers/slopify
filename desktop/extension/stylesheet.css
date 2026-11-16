@@ -1,0 +1,8 @@
+.slopify-menu { min-width: 340px; max-width: 420px; }
+.slopify-info { spacing: 5px; padding: 8px 0; }
+.slopify-speaker { font-size: 0.9em; color: #a6d6ba; }
+.slopify-title { font-size: 1.4em; font-weight: bold; }
+.slopify-artist { font-size: 1.1em; }
+.slopify-album, .slopify-source { color: #aaa; font-size: 0.9em; }
+.slopify-control { margin: 0 4px; padding: 8px 20px; }
+.slopify-db { min-width: 70px; text-align: right; }

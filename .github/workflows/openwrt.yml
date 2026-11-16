@@ -23,7 +23,7 @@ jobs:
       - name: Build static player and assemble image with Docker Image Builder
         env:
           PROFILE: ${{ matrix.profile }}
-        run: player/openwrt/build.sh "$PROFILE"
+        run: appliance/build.sh "$PROFILE"
       - name: Prepare release images and manifests
         env:
           PROFILE: ${{ matrix.profile }}

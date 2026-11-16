@@ -1,0 +1,40 @@
+diff --git a/libs/v4l-utils/Makefile b/libs/v4l-utils/Makefile
+index 3e4d091..be281ec 100644
+--- a/libs/v4l-utils/Makefile
++++ b/libs/v4l-utils/Makefile
+@@ -7,7 +7,7 @@ include $(TOPDIR)/rules.mk
+ 
+ PKG_NAME:=v4l-utils
+ PKG_VERSION:=1.30.1
+-PKG_RELEASE:=1
++PKG_RELEASE:=2
+ 
+ PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.xz
+ PKG_SOURCE_URL:=https://www.linuxtv.org/downloads/v4l-utils
+@@ -65,7 +65,7 @@ define Package/v4l-utils
+   SECTION:=utils
+   CATEGORY:=Utilities
+   TITLE+= utilities
+-  DEPENDS:=+libudev +libv4l +libstdcpp $(ICONV_DEPENDS) $(INTL_DEPENDS)
++  DEPENDS:=+libudev +libv4l +libstdcpp +libbpf +libelf $(ICONV_DEPENDS) $(INTL_DEPENDS)
+   LICENSE:=GPL-2.0-or-later
+   LICENSE_FILES:=COPYING
+ endef
+@@ -90,7 +90,7 @@ endef
+ MESON_ARGS += \
+ 	-Db_lto=false \
+ 	-Ddefault_library=both \
+-	-Dbpf=disabled \
++	-Dbpf=enabled \
+ 	-Dgconv=disabled \
+ 	-Djpeg=disabled \
+ 	-Dlibdvbv5=disabled \
+@@ -118,6 +118,8 @@ define Package/libv4l/install
+ endef
+ 
+ define Package/v4l-utils/install
++	$(INSTALL_DIR) $(1)/etc/rc_keymaps/protocols
++	$(CP) $(PKG_INSTALL_DIR)/lib/udev/rc_keymaps/protocols/*.o $(1)/etc/rc_keymaps/protocols/
+ 	$(INSTALL_DIR) $(1)/etc
+ 	$(CP) $(PKG_INSTALL_DIR)/etc/rc_maps.cfg $(1)/etc/
+ 	$(CP) $(PKG_INSTALL_DIR)/etc/rc_keymaps $(1)/etc/

@@ -24,7 +24,6 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
-	"math"
 	"net"
 	"net/http"
 	"net/netip"
@@ -44,6 +43,7 @@ const version = "0.1"
 
 // state is the part of the output's state the player acts on.
 type state struct {
+	Seek         *seekEvent      `json:"seek,omitempty"`
 	QueueGroup   string          `json:"queueGroup"`
 	QueueCommand string          `json:"queueCommand"`
 	Volume       *volume.Control `json:"volume,omitempty"`
@@ -54,6 +54,12 @@ type state struct {
 	State        string          `json:"state"`
 	Position     float64         `json:"position"`
 	Version      uint64          `json:"version"`
+}
+
+type seekEvent struct {
+	ID       string  `json:"id"`
+	Entry    uint64  `json:"entry"`
+	Position float64 `json:"position"`
 }
 
 type entry struct {
@@ -130,7 +136,7 @@ func main() {
 	flag.IntVar(&tuning.KeepAliveCount, "tcp-keepalive-count", 3, "unanswered TCP keepalive probes before dropping the connection; 0 for the system default")
 	readAheadMiB := flag.Int("read-ahead-mib", -1, "memory for downloading originals ahead of decoding, the current track to its end and then the next; -1 for half the memory limit (at most 1024), 0 to fetch only as decoding needs")
 	flag.BoolVar(&allowOutputTruncate, "allow-truncate", false, "ALSA: permit truncating to 16-bit output if no precision-preserving format works")
-	liveDeviceMS := flag.Int("live-device-buffer-ms", 0, "ALSA buffer for LAN sources in milliseconds, 40 to 2000; 0 lets the device choose within 150 to 250")
+	liveDeviceMS := flag.Int("live-device-buffer-ms", 0, "ALSA buffer for LAN sources in milliseconds, 40 to 2000; 0 lets the device choose within 40 to 80")
 	esoundBufferMS := flag.Int("esound-buffer-ms", esound.DefaultBufferMillis, "ESound stream buffer in milliseconds, 20 to 2000")
 	esoundSocketMS := flag.Int("esound-socket-ms", 0, "cap ESound's kernel receive queue, in milliseconds of audio; 0 leaves the system default, which adds delay")
 	raopListen := flag.String("raop-listen", "", "trusted-LAN AirPlay 1 (RAOP) receiver address, for example :5000; advertised over mDNS, no authentication")
@@ -694,6 +700,12 @@ func (c *controller) reconcile(s *state) {
 	announceStart := s.State == "playing" && (c.desired == nil || c.desired.State != "playing" || c.desired.Current != s.Current)
 	paused := c.desired != nil && c.desired.State == "playing" && s.State == "paused" && s.Adopted && c.desired.Current == s.Current
 	versionChanged := c.desired == nil || s.Version != c.applied
+	seekChanged := s.Seek != nil && s.Seek.ID != "" && s.Seek.Entry == s.Current &&
+		(c.desired == nil || c.desired.Seek == nil || c.desired.Seek.ID != s.Seek.ID)
+	startPosition := s.Position
+	if seekChanged {
+		startPosition = s.Seek.Position
+	}
 	if c.desired == nil || versionChanged || s.State != c.desired.State || s.Current != c.desired.Current || s.Adopted != c.desired.Adopted {
 		slog.Info("playback command", "state", s.State, "entry", s.Current, "version", s.Version, "adopted", s.Adopted)
 	}
@@ -752,12 +764,13 @@ func (c *controller) reconcile(s *state) {
 			StartAnnounced(uint64, float64) playbackSession
 		}); ok && announceStart {
 			c.stop()
-			c.sess = announcer.StartAnnounced(e.ID, s.Position)
+			c.sess = announcer.StartAnnounced(e.ID, startPosition)
 		} else {
-			c.start(e.ID, s.Position)
+			c.start(e.ID, startPosition)
 		}
-	case versionChanged && math.Abs(c.sess.position()-s.Position) > 2:
-		c.startSeek(e.ID, s.Position)
+	// Progress snapshots acknowledge playback; only an explicit event seeks.
+	case seekChanged:
+		c.startSeek(e.ID, s.Seek.Position)
 	}
 }
 

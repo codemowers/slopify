@@ -168,10 +168,11 @@ func TestSenderKeyStableAndNamedByHost(t *testing.T) {
 func TestMetricsAreBoundedAndServed(t *testing.T) {
 	metricBuffer.WithLabelValues(stageInput, "pulse", "lan_1").Observe(80)
 	metricUnderruns.WithLabelValues(audio(stageOutput, "slopify")...).Add(0)
+	metricStreamEvents.WithLabelValues(stageInput, "pulse", "lan_1", "flush").Add(1)
 	w := httptest.NewRecorder()
 	promhttp.HandlerFor(nativeMetricsRegistry, promhttp.HandlerOpts{}).ServeHTTP(w, httptest.NewRequest("GET", "/metrics", nil))
 	body := w.Body.String()
-	for _, want := range []string{"slopify_audio_buffer_seconds_bucket", `stage="input"`, `transport="pulse"`, `source="lan_1"`, "slopify_audio_underruns_total", "go_gc_duration_seconds"} {
+	for _, want := range []string{"slopify_audio_buffer_seconds_bucket", `stage="input"`, `transport="pulse"`, `source="lan_1"`, "slopify_audio_underruns_total", "slopify_audio_stream_events_total", `event="flush"`, "go_gc_duration_seconds"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing %s", want)
 		}
@@ -319,5 +320,28 @@ func TestSourceLabelsUsePeerAddressAndStayBounded(t *testing.T) {
 	noteSource("lan_91", "pulse", "10.0.0.7", "")
 	if n := metricUnderruns.DeletePartialMatch(prometheus.Labels{"source": "10.0.0.5"}); n != 0 {
 		t.Fatal("previous sender's series survived the slot change")
+	}
+}
+
+type sourceStatsStream struct {
+	fakeLiveStream
+	stats pcmring.Stats
+}
+
+func (s *sourceStatsStream) Stats() pcmring.Stats { return s.stats }
+func (s *sourceStatsStream) Protocol() string     { return "pulse" }
+
+func TestSourceDropCountersRemainVisibleWithoutPrometheus(t *testing.T) {
+	previous := metricsEnabled
+	metricsEnabled = false
+	t.Cleanup(func() { metricsEnabled = previous })
+	stream := &sourceStatsStream{stats: pcmring.Stats{TargetUsec: 100_000, Underflows: 2, Overflows: 3,
+		Events: [pcmring.StreamEventCount]uint64{pcmring.EventFlush: 4}}}
+	lan := &nativeLAN{c: &controller{}, router: &nativeRouter{}, consumers: map[string]*nativeConsumer{
+		"sender": {stream: stream},
+	}}
+	buffer := lan.bufferStatus(&speakerSource{ID: "lan_1", Key: "sender"})
+	if buffer == nil || buffer.Underflows != 2 || buffer.Overflows != 3 || buffer.Events["flush"] != 4 {
+		t.Fatalf("missing source damage counters with Prometheus disabled: %+v", buffer)
 	}
 }

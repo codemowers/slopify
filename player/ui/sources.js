@@ -164,6 +164,7 @@ function renderSources(control, nodes) {
   const host=s.id!=='slopify' && s.host!==s.name?s.host:"";
   if(s.format)renderPCM(card.details,s.format);
   else card.details.textContent="";
+  card.details.append(card.state);
   if(s.input?.frames>0 && s.input?.rate>0 && !(s.id==='slopify' && queueLink?.sourceId)) {
    const bps=s.input.bytes*8*s.input.rate/s.input.frames;
    const rate=document.createElement('span');
@@ -171,8 +172,12 @@ function renderSources(control, nodes) {
    rate.title='Average encoded bytes consumed per decoded audio second; not PCM bitrate or download speed.';
    card.details.append(rate);
   }
-  if(card.details.textContent)card.details.append(document.createTextNode(' · '));
-  card.details.append(card.state);
+  if(Number.isFinite(s.buffer?.syncOffsetMs)) {
+   const offset=document.createElement('span');
+   offset.textContent=` · ${s.buffer.syncOffsetMs} ms A/V offset`;
+   offset.title='Estimated receiver buffering including the output device; excludes sender and network delay. Not a measured lip-sync error.';
+   card.details.append(offset);
+  }
   card.ip.textContent=s.id==='slopify'?'':[host,s.ip?`IP: ${s.ip}`:null].filter(Boolean).join(" · ");card.ip.hidden=!card.ip.textContent;
   renderSourceBuffer(card,s.buffer);
   const hiddenMetadata=new Set(['bitrate','bits','channels','codec','duration','kind','sampleRate','size','videoCodec']);
@@ -235,7 +240,10 @@ function renderSourceBuffer(card,buffer) {
  card.buffer.hidden=!buffer?.streamMaxMs;
  if(card.buffer.hidden)return;
  const parts=bufferRow('Buffer',buffer.streamMs,buffer.streamMaxMs);
- if(buffer.underflows){const u=document.createElement('span');u.className='source-underflows';u.textContent=`${buffer.underflows} underflow${buffer.underflows===1?'':'s'}`;parts.push(u);}
+ const counters=document.createElement('span'),underflows=buffer.underflows||0,overflows=buffer.overflows||0;
+ counters.className='source-buffer-events'+(underflows||overflows?' source-underflows':'');
+ counters.textContent=`${underflows} underflow${underflows===1?'':'s'} · ${overflows} overflow${overflows===1?'':'s'}`;
+ parts.push(counters);
  card.buffer.replaceChildren(...parts);
 }
 // The hardware's queue belongs to the output, whichever source is feeding it.
@@ -292,7 +300,7 @@ function renderSourceStatuses() {
   const pinned=selected && sourceControl?.mode==='off';
   const loading=id==='slopify' && !source.detached && !source.paused?playbackLabel():'';
   const label=loading || (selected && sourceBusy?'Updating source…':'');
-  let state=source.active?'Playing through amplifier':source.connected?source.state||'Connected':'Disconnected';
+  let state=source.active?'':source.connected?source.state||'Connected':'Disconnected';
   if(source.detached)state='Not joined to queue · click to join';
   else if(source.paused)state='Queue paused';
   else if(selected && !source.active && !loading)state=source.connected?'Waiting for audio':'Waiting for source to connect';
@@ -302,8 +310,9 @@ function renderSourceStatuses() {
    if(queueLink.reason)state+=` · ${queueLink.reason}`;
   }
   if(id===queueLink?.sourceId && sourceControl?.selected==='slopify')state='Supplying Slopify automatically · pin to select directly';
-  if(pinned)state+=source.protocol==='rtp'?` · staying with ${source.name.split(' · ')[0]}`:' · source pinned';
-  card.state.textContent=label || state;
+  if(pinned)state+=(state?' · ':'')+(source.protocol==='rtp'?`staying with ${source.name.split(' · ')[0]}`:'source pinned');
+  const status=label || state;
+  card.state.textContent=(status && source.format?' · ':'')+status;
   card.spinner.hidden=!label;
   card.root.classList.toggle('source-pending',!!label);
  }

@@ -133,14 +133,14 @@ func forgetSource(label string) {
 	for _, v := range []interface {
 		DeletePartialMatch(prometheus.Labels) int
 	}{metricBuffer, metricWriteTime, metricReceiveGap, metricLoopGap, metricFetch, metricStartup,
-		metricUnderruns, metricOverflows, metricErrors, metricLostFrames, metricClipped, metricOpens, metricBytes, metricPackets,
+		metricUnderruns, metricOverflows, metricErrors, metricStreamEvents, metricLostFrames, metricClipped, metricOpens, metricBytes, metricPackets,
 		metricBufferBytes, metricBufferLimitBytes, metricSelected, metricRate} {
 		v.DeletePartialMatch(match)
 	}
 }
 
 const (
-	helpOverflows = "Audio dropped because a queue was full: a sender outpacing input, or a full multicast output queue."
+	helpOverflows = "Queue overflow events that dropped audio: a sender outpacing input, or a full multicast output queue."
 	helpErrors    = "Failures, by reason. output: write, send (multicast); input: decode, unsupported, stream_url, or a download reason; download: network, status, range, changed, url."
 	helpBytes     = "Bytes at a stage: download from the server, input taken from a sender's stream, output multicast."
 	helpPackets   = "Packets at a stage: input blocks arriving from a sender (RTP packets for multicast), output RTP packets multicast."
@@ -167,8 +167,12 @@ var (
 
 	metricUnderruns = audioCounter("slopify_audio_underruns_total",
 		"A stage ran out of audio. download: decoding waited for the network; input: a sender's stream or the decoded queue ran dry (a PipeWire sender rewinds and repeats audio); output: the device ran dry, an audible dropout.")
-	metricOverflows = audioCounter("slopify_audio_overflows_total", helpOverflows)
-	metricErrors    = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "slopify_audio_errors_total", Help: helpErrors},
+	metricOverflows    = audioCounter("slopify_audio_overflows_total", helpOverflows)
+	metricStreamEvents = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "slopify_audio_stream_events_total",
+		Help: "Observed receiver stream events, not sender-internal clock corrections: cork, uncork, flush, seek, rewind and timing replies.",
+	}, append(append([]string{}, audioLabelNames...), "event"))
+	metricErrors = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "slopify_audio_errors_total", Help: helpErrors},
 		append(append([]string{}, audioLabelNames...), "reason"))
 	metricLostFrames = audioCounter("slopify_audio_lost_frames_total",
 		"Frames lost on the way from a multicast sender, played as silence.")
@@ -206,7 +210,7 @@ func audioGauge(name, help string) *prometheus.GaugeVec {
 
 func init() {
 	nativeMetricsRegistry.MustRegister(metricBuffer, metricWriteTime, metricReceiveGap, metricLoopGap, metricFetch, metricStartup,
-		metricUnderruns, metricOverflows, metricErrors, metricLostFrames, metricClipped, metricOpens, metricBytes, metricPackets,
+		metricUnderruns, metricOverflows, metricErrors, metricStreamEvents, metricLostFrames, metricClipped, metricOpens, metricBytes, metricPackets,
 		metricBufferBytes, metricBufferLimitBytes, metricSelectionChanges, metricSelected, metricRate,
 		// Garbage collection pauses and scheduling latency are prime glitch suspects.
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))

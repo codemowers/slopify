@@ -1,5 +1,5 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: {{ ternary "StatefulSet" "Deployment" .Values.persistentWorkloads }}
 metadata:
   name: slopify-players
   labels: &labels
@@ -8,8 +8,12 @@ metadata:
 spec:
   replicas: 1
   # One instance owns the player state and the outputs' event streams.
+  {{- if .Values.persistentWorkloads }}
+  serviceName: slopify-players
+  {{- else }}
   strategy:
     type: Recreate
+  {{- end }}
   selector:
     matchLabels: *labels
   template:
@@ -29,6 +33,10 @@ spec:
         runAsGroup: 65532
         fsGroup: 65532
         fsGroupChangePolicy: OnRootMismatch
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: players
           image: "{{ if .Values.imageRepository }}{{ .Values.imageRepository }}/{{ end }}{{ .Values.images.players }}"
@@ -40,7 +48,7 @@ spec:
                   name: oidc-client-slopify-owner-secrets
                   key: OIDC_CLIENT_ORIGIN
             - name: STATE_FILE
-              value: /data/players.json
+              value: {{ .Values.players.stateFile | quote }}
             - name: STREAM_SIGNING_KEY
               valueFrom:
                 secretKeyRef:

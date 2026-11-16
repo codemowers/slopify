@@ -1,0 +1,48 @@
+# GL-AR750/AR750S: all sockets are LAN switch ports, with a DHCP client.
+# Wi-Fi station mode can use a separate DHCP interface; no NAT or DHCP server.
+. /lib/functions.sh
+case "$(cat /tmp/sysinfo/board_name)" in
+ glinet,gl-ar750) ports='0t 1 2'; extra=eth1 ;;
+ glinet,gl-ar750s-nor|glinet,gl-ar750s-nor-nand) ports='0t 1 2 3'; extra= ;;
+ *) exit 1 ;;
+esac
+config_load network
+remove_vlan() { uci -q delete "network.$1"; }
+remove_bridge() {
+ local name
+ config_get name "$1" name
+ [ "$name" != br-lan ] || uci -q delete "network.$1"
+}
+config_foreach remove_vlan switch_vlan
+config_foreach remove_bridge device
+uci -q batch <<-UCI
+ delete network.wan
+ delete network.wan6
+ set network.@switch[0].enable_vlan='1'
+ set network.slopify_ports=switch_vlan
+ set network.slopify_ports.device='switch0'
+ set network.slopify_ports.vlan='1'
+ set network.slopify_ports.ports='$ports'
+ set network.slopify_bridge=device
+ set network.slopify_bridge.name='br-lan'
+ set network.slopify_bridge.type='bridge'
+ set network.slopify_bridge.bridge_empty='1'
+ add_list network.slopify_bridge.ports='eth0.1'
+ set network.lan.device='br-lan'
+ delete network.lan.type
+ delete network.lan.ifname
+ set network.lan.proto='dhcp'
+ delete network.lan.ipaddr
+ delete network.lan.netmask
+ delete network.lan.ip6assign
+ set network.lan6=interface
+ set network.lan6.device='@lan'
+ set network.lan6.proto='dhcpv6'
+ set network.lan6.reqprefix='no'
+ set dhcp.lan.ignore='1'
+ set dhcp.lan.dhcpv6='disabled'
+ set dhcp.lan.ra='disabled'
+UCI
+[ -z "$extra" ] || uci add_list network.slopify_bridge.ports="$extra"
+uci commit
+exit 0

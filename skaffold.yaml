@@ -10,22 +10,22 @@ build:
   artifacts:
     - image: slopify-indexer
       docker:
-        dockerfile: build/indexer.Dockerfile
+        dockerfile: server/build/indexer.Dockerfile
     - image: slopify-catalog
       docker:
-        dockerfile: build/catalog.Dockerfile
+        dockerfile: server/build/catalog.Dockerfile
     - image: slopify-streamer
       docker:
-        dockerfile: build/streamer.Dockerfile
+        dockerfile: server/build/streamer.Dockerfile
     - image: slopify-players
       docker:
-        dockerfile: build/players.Dockerfile
+        dockerfile: server/build/players.Dockerfile
     - image: slopify-frontend
       docker:
-        dockerfile: build/frontend.Dockerfile
+        dockerfile: server/build/frontend.Dockerfile
     - image: slopify-transcoder
       docker:
-        dockerfile: build/transcoder.Dockerfile
+        dockerfile: server/build/transcoder.Dockerfile
 manifests:
   helm:
     flags:
@@ -50,3 +50,22 @@ deploy:
     flags:
       delete:
         - --selector=skaffold.dev/keep!=true
+
+profiles:
+  - name: demo
+    build:
+      platforms: [linux/amd64]
+    patches:
+      - op: replace
+        path: /manifests/helm/releases/0/valuesFiles
+        value:
+          - chart/demo.yaml
+          - chart/values-demo.yaml
+      - op: add
+        path: /manifests/helm/releases/0/namespace
+        value: demo
+    deploy:
+      kubeContext: admin@ee-lte-1.codemowers.io
+      statusCheckDeadlineSeconds: 600
+      kubectl:
+        defaultNamespace: demo

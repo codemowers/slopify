@@ -1,5 +1,5 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: {{ ternary "StatefulSet" "Deployment" .Values.persistentWorkloads }}
 metadata:
   name: slopify-indexer
   labels: &labels
@@ -8,8 +8,12 @@ metadata:
 spec:
   replicas: 1
   # Two indexers must never write sidecars at once.
+  {{- if .Values.persistentWorkloads }}
+  serviceName: slopify-indexer
+  {{- else }}
   strategy:
     type: Recreate
+  {{- end }}
   selector:
     matchLabels: *labels
   template:
@@ -28,6 +32,33 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.demoSeed.enabled }}
+      initContainers:
+        - name: demo-import
+          image: "{{ if .Values.imageRepository }}{{ .Values.imageRepository }}/{{ end }}{{ .Values.images.indexer }}"
+          command: [/demoseed]
+          env:
+            - name: MEDIA_ROOT
+              value: /media
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: "1"
+              memory: 128Mi
+          securityContext:
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: media
+              mountPath: /media
+      {{- end }}
       containers:
         - name: indexer
           image: "{{ if .Values.imageRepository }}{{ .Values.imageRepository }}/{{ end }}{{ .Values.images.indexer }}"

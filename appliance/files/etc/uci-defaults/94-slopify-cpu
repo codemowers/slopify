@@ -1,0 +1,3 @@
+#!/bin/sh
+/etc/init.d/slopify-cpu enable
+/etc/init.d/slopify-cpu start

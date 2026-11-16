@@ -1,5 +1,11 @@
 # Explicit account allowlist; set this in your private installation values.
 allowedUsers: []
+# Explicit opt-in: keep OIDC login but admit every account.
+allowAllUsers: false
+# Use single-replica StatefulSets for services mounting persistent volumes.
+persistentWorkloads: false
+demoSeed:
+  enabled: false
 domain: slopify.example.com
 imageRepository: ""
 # Images may include tags and digests; Skaffold replaces these after builds.
@@ -12,6 +18,9 @@ images:
   transcoder: slopify-transcoder:latest
 imagePullSecret: ""
 priorityClassName: ""
+nodeSelector: {}
+# Optional strategy for the stateless frontend.
+frontendStrategy: ""
 ingress:
   enabled: true
   className: ""
@@ -35,6 +44,7 @@ media:
   storageClassName: ""
   size: 5Gi
 players:
+  stateFile: /data/players.json
   existingClaim: ""
   storageClassName: ""
   size: 1Gi

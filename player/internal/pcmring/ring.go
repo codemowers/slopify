@@ -7,9 +7,26 @@ import (
 	"time"
 )
 
+type StreamEvent int
+
+const (
+	EventCork StreamEvent = iota
+	EventUncork
+	EventFlush
+	EventSeek
+	EventRewind
+	EventTiming
+	StreamEventCount
+)
+
+func (e StreamEvent) String() string {
+	return [...]string{"cork", "uncork", "flush", "seek", "rewind", "timing"}[e]
+}
+
 // Stats describes a live stream's buffering for display and metrics. Each receiver
 // fills what it can know; zero means none.
 type Stats struct {
+	Events                   [StreamEventCount]uint64
 	BufferedUsec, TargetUsec uint64
 	Underflows               uint64
 	Overflows                uint64 // Audio discarded because the sender outran the output.

@@ -79,7 +79,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: build/${{ matrix.service }}.Dockerfile
+          file: server/build/${{ matrix.service }}.Dockerfile
           platforms: linux/amd64
           push: ${{ github.ref_type == 'tag' }}
           load: ${{ github.ref_type != 'tag' }}

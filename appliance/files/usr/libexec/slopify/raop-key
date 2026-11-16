@@ -1,0 +1,38 @@
+#!/bin/sh
+# Fetches the RAOP RSA key that iPhone, iPad and Mac require, only when AirPlay and
+# its encryption are both enabled. The key is not shipped with Slopify. Its origin
+# is not trusted either: the player accepts only the key whose public half every
+# RAOP sender already uses, so a substituted file is rejected, never installed.
+
+. /lib/functions.sh
+. /usr/libexec/slopify/common.sh
+
+URL=https://raw.githubusercontent.com/mikebrady/shairport-sync/5.6.2/common.c
+LOCK=/var/lock/slopify-raop-key
+
+check() { /usr/bin/slopify-player -raop-key "$1" -raop-key-check >/dev/null 2>&1; }
+
+config_load slopify
+config_get_bool raop player raop 0
+config_get_bool crypto player raop_crypto 0
+[ "$raop" = 1 ] && [ "$crypto" = 1 ] || exit 0
+[ -s "$SLOPIFY_RAOP_KEY" ] && check "$SLOPIFY_RAOP_KEY" && exit 0
+mkdir "$LOCK" 2>/dev/null || exit 0
+trap 'rm -f "$tmp"; rmdir "$LOCK"' EXIT
+tmp="$SLOPIFY_RAOP_KEY.tmp.$$"
+
+# TLS needs the clock, which a Pi only has once NTP has answered.
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+	uclient-fetch -q -T 20 -O - "$URL" 2>/dev/null |
+		sed -n '/BEGIN RSA PRIVATE KEY/,/END RSA PRIVATE KEY/p' |
+		sed -e 's/^[^"]*"//' -e 's/\\n.*$//' -e 's/\\0.*$//' -e 's/".*$//' > "$tmp"
+	if check "$tmp"; then
+		chown root:audio "$tmp" && chmod 0640 "$tmp" && mv "$tmp" "$SLOPIFY_RAOP_KEY" || exit 1
+		logger -t slopify "AirPlay encryption key installed; restarting the player"
+		/etc/init.d/slopify-player enabled && /etc/init.d/slopify-player restart
+		exit 0
+	fi
+	sleep 30
+done
+logger -t slopify "AirPlay encryption key download failed; Apple devices cannot connect"
+exit 1

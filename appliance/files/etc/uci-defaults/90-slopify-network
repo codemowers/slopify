@@ -1,0 +1,27 @@
+# Speaker on an existing wired LAN: DHCP/DHCPv6 client directly on eth0,
+# never a DHCP or RA server. Preserve separately configured Wi-Fi interfaces.
+# Both supported boards have one wired port. Remove the stock LAN bridge;
+# re-read section IDs after each deletion because anonymous indices shift.
+while :; do
+	bridge=$(uci -q show network | sed -n "s/^network\.\([^=]*\)\.name='br-lan'$/\1/p" | head -n 1)
+	[ -n "$bridge" ] || break
+	uci -q delete "network.$bridge" || exit 1
+done
+uci -q batch <<-UCI
+	set network.lan.device='eth0'
+	delete network.lan.type
+	delete network.lan.ifname
+	set network.lan.proto='dhcp'
+	delete network.lan.ipaddr
+	delete network.lan.netmask
+	delete network.lan.ip6assign
+	set network.lan6=interface
+	set network.lan6.device='@lan'
+	set network.lan6.proto='dhcpv6'
+	set network.lan6.reqprefix='no'
+	set dhcp.lan.ignore='1'
+	set dhcp.lan.dhcpv6='disabled'
+	set dhcp.lan.ra='disabled'
+UCI
+uci commit
+exit 0

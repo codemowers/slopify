@@ -1,0 +1,36 @@
+{
+	"luci-app-slopify": {
+		"description": "Configure the Slopify player",
+		"read": {
+			"file": {
+				"/usr/libexec/slopify/audio-info": [
+					"exec"
+				],
+				"/usr/libexec/slopify/hat-info": [
+					"exec"
+				],
+				"/usr/libexec/slopify/ir-info": [
+					"exec"
+				]
+			},
+			"uci": [
+				"slopify",
+				"system"
+			]
+		},
+		"write": {
+			"file": {
+				"/usr/libexec/slopify/hat-set": [
+					"exec"
+				],
+				"/usr/libexec/slopify/ir-learn": [
+					"exec"
+				]
+			},
+			"uci": [
+				"slopify",
+				"system"
+			]
+		}
+	}
+}

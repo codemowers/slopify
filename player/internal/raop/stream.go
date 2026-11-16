@@ -249,6 +249,6 @@ func (s *Stream) writeSilence() {
 func (s *Stream) write(b []byte) {
 	discarded, _ := s.ring.WriteLatest(b)
 	if discarded > 0 {
-		s.discard.Add(uint64(discarded))
+		s.discard.Add(1)
 	}
 }

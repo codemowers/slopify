@@ -1,0 +1,141 @@
+#!/bin/sh /etc/rc.common
+# Slopify device player. The pairing token and local source settings persist
+# in /etc/slopify-player because /var is tmpfs on OpenWrt.
+
+START=90
+STOP=10
+USE_PROCD=1
+
+. /usr/libexec/slopify/common.sh
+
+start_service() {
+	local server card name listen pulse esound upnp raop raop_crypto rtp rtp_send queue_share rtp_send_group volume_control vmin vmax vinitial
+	local live_buffer rotary path key flag option default value local_sse_interval_ms metrics
+	/usr/libexec/slopify/rtp-group || return 1
+	config_load slopify
+	config_get server player server
+	config_get listen player local_listen ':80'
+	config_get_bool pulse player pulse 1
+	config_get_bool esound player esound 0
+	config_get_bool upnp player upnp 0
+	config_get_bool raop player raop 0
+	config_get_bool raop_crypto player raop_crypto 0
+	config_get_bool rtp player rtp 0
+	config_get_bool rtp_send player rtp_send 0
+	config_get_bool queue_share player queue_share 0
+	config_get rtp_send_group player rtp_send_group
+	config_get live_buffer player live_buffer_ms
+	config_get read_ahead player read_ahead_mib -1
+	config_get memory_limit player memory_limit 64MiB
+	config_get local_sse_interval_ms player local_sse_interval_ms 200
+	config_get metrics player metrics ''
+	config_get volume_control player volume_control
+	config_get vmin player volume_min 0
+	config_get vmax player volume_max 40
+	config_get vinitial player volume_initial 10
+
+	if [ -z "$server" ] && [ -z "$listen" ]; then
+		echo "slopify: set slopify.player.server or local_listen" >&2
+		return 1
+	fi
+	card="$(slopify_card)"
+	name="$(slopify_name)"
+	mkdir -p "$SLOPIFY_STATE"
+	chown nobody:audio "$SLOPIFY_STATE"
+	chmod 0700 "$SLOPIFY_STATE"
+	# Lets the sound hotplug handler follow a card change.
+	mkdir -p "$SLOPIFY_RUN"
+	printf '%s\n' "$card" > "$SLOPIFY_RUN/player-card"
+
+	procd_open_instance
+	# Use ujail for capability/user setup without a filesystem namespace.
+	# procd's capabilities option alone is ignored without a configured jail.
+	procd_set_param command /sbin/ujail -C /etc/capabilities/slopify-player.json \
+		-c -U nobody -G audio
+	for option in PATH SLOPIFY_OUTPUT SLOPIFY_SERVER SLOPIFY_NAME SLOPIFY_TOKEN_FILE SLOPIFY_PULSE_SINK HOME SLOPIFY_PULSE_ENABLED GOMEMLIMIT; do
+		procd_append_param command -e "$option"
+	done
+	procd_append_param command -- /usr/bin/slopify-player -local-state="$SLOPIFY_STATE/local-audio.json" -read-ahead-mib="$read_ahead"
+	case "$metrics" in 0|1) procd_append_param command -metrics="$metrics" ;; esac
+	if [ "$rtp_send" = 1 ] || [ "$queue_share" = 1 ]; then
+		[ "$rtp_send" = 1 ] && procd_append_param command -rtp-send
+		[ "$queue_share" = 1 ] && procd_append_param command -queue-share
+		case "$rtp_send_group" in *:*) ;; *) rtp_send_group="$rtp_send_group:5004" ;; esac
+		procd_append_param command -rtp-send-group="$rtp_send_group"
+	fi
+	if [ -n "$listen" ]; then
+		procd_append_param command -local-listen="$listen" -local-source-control
+		procd_append_param command -local-sse-interval="${local_sse_interval_ms}ms"
+		local settings_listen settings_port
+		settings_listen="$(uci -q get uhttpd.main.listen_http)"
+		settings_listen="${settings_listen%% *}"
+		settings_port="${settings_listen##*:}"
+		case "$settings_port" in ''|*[!0-9]*) ;; *)
+			procd_append_param command -local-settings-url=/cgi-bin/luci/admin/services/slopify -local-settings-port="$settings_port"
+		;; esac
+		[ "$pulse" = 1 ] && procd_append_param command -pulse-listen=:4713
+		[ "$esound" = 1 ] && procd_append_param command -esound-listen=:16001
+		[ "$upnp" = 1 ] && procd_append_param command -upnp-listen=:49494
+		if [ "$raop" = 1 ]; then
+			procd_append_param command -raop-listen=:5000
+			if [ "$raop_crypto" = 1 ]; then
+				# Without the key the receiver still serves PipeWire and PulseAudio.
+				procd_append_param command -raop-key="$SLOPIFY_RAOP_KEY"
+				[ -s "$SLOPIFY_RAOP_KEY" ] || /usr/libexec/slopify/raop-key >/dev/null 2>&1 &
+			fi
+		fi
+		[ "$rtp" = 1 ] && procd_append_param command -rtp-receive
+	else
+		pulse=0
+	fi
+	if [ -n "$card" ]; then
+		procd_set_param env SLOPIFY_OUTPUT="alsa:hw:CARD=$card,DEV=0"
+	else
+		procd_set_param env SLOPIFY_OUTPUT=null
+	fi
+	if [ -n "$volume_control" ] && [ -n "$card" ]; then
+		procd_append_param command -volume-control="$volume_control" \
+			-volume-card="$card" -volume-min="$vmin" \
+			-volume-max="$vmax" -volume-initial="$vinitial"
+	fi
+	config_get value player cue_level_db -6
+	procd_append_param command -cue-level-db "$value"
+	config_get_bool value player allow_truncate 0
+	[ "$value" = 1 ] && procd_append_param command -allow-truncate
+	[ -n "$live_buffer" ] && procd_append_param command -live-device-buffer-ms="$live_buffer"
+	for option in pulse_buffer_ms esound_buffer_ms esound_socket_ms rtp_buffer_ms raop_buffer_ms; do
+		config_get value player "$option"
+		flag="$(printf '%s' "$option" | tr _ -)"
+		[ -n "$value" ] && procd_append_param command "-$flag=$value"
+	done
+ config_get value player ir_receiver
+ if [ -n "$value" ]; then
+  if path="$(/usr/libexec/slopify/ir-setup 2>"$SLOPIFY_RUN/ir-error")"; then
+   case "$path" in
+    /dev/input/event[0-9]*)
+     [ -c "$path" ] || logger -t slopify "IR event device is unavailable" ;;
+   esac
+  else
+   logger -t slopify "IR input setup failed: $(head -c 512 "$SLOPIFY_RUN/ir-error")"
+  fi
+ fi
+	slopify_grant_devices
+	for path in /dev/input/event*; do
+		[ -c "$path" ] && procd_append_param command "-input=$path"
+	 done
+	config_get rotary player rotary_input
+	[ -n "$rotary" ] && procd_append_param command "-rotary-input=$rotary"
+	procd_append_param env SLOPIFY_SERVER="$server" SLOPIFY_NAME="$name" \
+		SLOPIFY_TOKEN_FILE="$SLOPIFY_STATE/token" SLOPIFY_PULSE_SINK=slopify.output \
+		HOME="$SLOPIFY_STATE" SLOPIFY_PULSE_ENABLED="$pulse" \
+		GOMEMLIMIT="$memory_limit" PATH=/usr/sbin:/usr/bin:/sbin:/bin
+	procd_set_param limits rtprio="88 88"
+	procd_set_param respawn 3600 3 0
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+service_triggers() {
+	procd_add_reload_trigger slopify system
+}

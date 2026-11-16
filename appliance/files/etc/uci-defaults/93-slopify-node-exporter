@@ -1,0 +1,5 @@
+# Serve node metrics on the LAN (stock is loopback only). Keep a chosen setting.
+[ "$(uci -q get prometheus-node-exporter-lua.main.listen_interface)" = loopback ] || exit 0
+uci set prometheus-node-exporter-lua.main.listen_interface='lan'
+uci commit prometheus-node-exporter-lua
+exit 0

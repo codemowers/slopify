@@ -29,21 +29,24 @@ type Stream struct {
 	Format, Channels, Rate int
 	Peer                   string
 
-	mu        sync.Mutex
-	props     map[string]string
-	attr      bufferAttr
-	ring      []byte
-	head, len int
-	written   int64
-	readIndex int64
-	missing   uint32
-	pending   uint32
-	corked    bool
-	prebuf    bool
-	started   bool
-	drainTag  *uint32
-	closed    bool
-	done      chan struct{}
+	mu         sync.Mutex
+	props      map[string]string
+	attr       bufferAttr
+	ring       []byte
+	head, len  int
+	written    int64
+	readIndex  int64
+	missing    uint32
+	pending    uint32
+	corked     bool
+	prebuf     bool
+	started    bool
+	playingFor uint64 // PCM bytes since starting or recovering from an underflow.
+	underrunAt time.Time
+	events     [pcmring.StreamEventCount]uint64
+	drainTag   *uint32
+	closed     bool
+	done       chan struct{}
 
 	channelMap []byte
 	volume     uint32
@@ -129,7 +132,7 @@ func (s *Stream) Stats() pcmring.Stats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	frame, rate := uint64(s.frameSize()), uint64(s.Rate)
-	return pcmring.Stats{BufferedUsec: uint64(s.len) / frame * 1_000_000 / rate,
+	return pcmring.Stats{Events: s.events, BufferedUsec: uint64(s.len) / frame * 1_000_000 / rate,
 		TargetUsec: uint64(s.attr.tLength) / frame * 1_000_000 / rate, Underflows: s.underflows, Overflows: s.overflows, Clipped: s.clipped.Load()}
 }
 
@@ -143,7 +146,7 @@ func (s *Stream) SetDeviceDelay(usec uint64) {
 
 func newStream(c *client, id, input uint32, format, channels, rate int, props map[string]string) *Stream {
 	return &Stream{client: c, ID: id, Input: input, volume: volumeNorm, Format: format, Channels: channels, Rate: rate,
-		Peer: c.peer, props: props, prebuf: true, done: make(chan struct{})}
+		Peer: c.peer, props: props, prebuf: true, underrunAt: time.Now(), done: make(chan struct{})}
 }
 
 // Done closes when the sender deletes the stream or disconnects.
@@ -209,6 +212,10 @@ func (s *Stream) setAttr(maxLength, tLength, prebuf, minReq uint32) {
 	if s.ring == nil || len(s.ring) != int(limit) {
 		ring := make([]byte, limit)
 		n := min(s.len, len(ring))
+		if n < s.len {
+			s.written -= int64(s.len - n)
+			s.overflows++
+		}
 		for i := 0; i < n; i++ {
 			ring[i] = s.ring[(s.head+i)%len(s.ring)]
 		}
@@ -256,6 +263,12 @@ func (s *Stream) receive(r io.Reader, length uint32, offset int64, flags uint32)
 	now := time.Now()
 	s.mu.Lock()
 	observe, last := s.onReceive, s.lastBlock
+	if offset != 0 || flags&0xff != 0 {
+		s.events[pcmring.EventSeek]++
+		if offset < 0 {
+			s.events[pcmring.EventRewind]++
+		}
+	}
 	s.lastBlock = now
 	dropped := 0
 	if room := len(s.ring) - s.len; len(buf) > room {
@@ -320,9 +333,11 @@ func (s *Stream) Read(p []byte) int {
 	}
 	s.len -= n
 	s.readIndex += int64(n)
+	s.playingFor += uint64(n)
 	notifyStart := n > 0 && !s.started
 	if notifyStart {
 		s.started = true
+		s.underrunAt = time.Time{}
 	}
 	underflow := n > 0 && s.len == 0 && s.attr.prebuf > 0 && s.drainTag == nil
 	var request uint32
@@ -338,7 +353,10 @@ func (s *Stream) Read(p []byte) int {
 	}
 	if underflow {
 		s.prebuf = true
+		s.started = false
 		s.underflows++
+		s.playingFor = 0
+		s.underrunAt = time.Now()
 	}
 	s.mu.Unlock()
 	if notifyStart {
@@ -371,9 +389,15 @@ func (s *Stream) drain(tag uint32) {
 
 func (s *Stream) flush() {
 	s.mu.Lock()
+	s.events[pcmring.EventFlush]++
 	s.head, s.len = 0, 0
+	// Pulse flushes the write queue back to the read position. Leaving the old
+	// index advertises discarded audio as permanently queued to the sender.
+	s.written = s.readIndex
 	s.prebuf = true
 	s.started = false
+	s.playingFor = 0
+	s.underrunAt = time.Now()
 	request := s.grant()
 	id := s.ID
 	s.mu.Unlock()
@@ -391,6 +415,16 @@ func (s *Stream) setPrebuf(on bool) {
 func (s *Stream) setCorked(corked bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.corked != corked {
+		if corked {
+			s.events[pcmring.EventCork]++
+		} else {
+			s.events[pcmring.EventUncork]++
+		}
+		s.playingFor = 0
+		s.started = false
+		s.underrunAt = time.Now()
+	}
 	s.corked = corked
 }
 
@@ -411,13 +445,20 @@ func (s *Stream) latencyReply(w *writer, sec, usec uint32) *writer {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
-	// No device delay here: a PipeWire tunnel steers this latency plus its own ring
-	// to a 200 ms target, so reporting more drains the ring and it then sends silence,
-	// heard as steady ticks. That costs senders A/V sync, which is not a priority.
-	w.usec(0).usec(0).boolean(s.started && !s.corked)
+	s.events[pcmring.EventTiming]++
+	// The indices already account for the stream ring. Only add device delay
+	// here, so senders can compensate playback without counting that ring twice.
+	playing := s.started && !s.corked && !s.prebuf
+	w.usec(s.deviceUsec).usec(0).boolean(playing)
 	w.timeval(sec, usec).timeval(uint32(now.Unix()), uint32(now.Nanosecond()/1000))
 	w.s64(s.written).s64(s.readIndex)
-	w.u64(0).u64(0)
+	var underrunFor uint64
+	if !playing && !s.underrunAt.IsZero() {
+		elapsed := max(time.Duration(0), now.Sub(s.underrunAt))
+		frames := uint64(elapsed/time.Second)*uint64(s.Rate) + uint64(elapsed%time.Second)*uint64(s.Rate)/uint64(time.Second)
+		underrunFor = frames * uint64(s.frameSize())
+	}
+	w.u64(underrunFor).u64(s.playingFor)
 	return w
 }
 

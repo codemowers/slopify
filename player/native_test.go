@@ -425,3 +425,13 @@ func TestNativeSourceFramesOn32Bit(t *testing.T) {
 		}
 	}
 }
+
+func TestFreshDeviceDiscardsPreviousPacingDeadline(t *testing.T) {
+	var fill nativeFillPacer
+	start := time.Now()
+	// Reopening after a source switch must not catch up 500 ms of old time.
+	fill.wait(start.Add(-500*time.Millisecond), 960, 48000, 0, start)
+	if elapsed := time.Since(start); elapsed < 15*time.Millisecond {
+		t.Fatalf("fresh output consumed audio immediately after reopen: %v", elapsed)
+	}
+}

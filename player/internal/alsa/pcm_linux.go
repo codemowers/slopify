@@ -262,7 +262,7 @@ func Open(spec string, capture bool, format, rate, channels int) (*PCM, error) {
 // OpenLowLatency trades underrun margin for delay, for live LAN sources whose
 // picture may be waiting on the sound.
 func OpenLowLatency(spec string, format, rate, channels int) (*PCM, error) {
-	return OpenBuffered(spec, false, format, rate, channels, 150_000, 250_000, 20_000, 50_000)
+	return OpenBuffered(spec, false, format, rate, channels, 40_000, 80_000, 10_000, 20_000)
 }
 
 // OpenBuffered is Open with an explicit preferred buffer and period range.

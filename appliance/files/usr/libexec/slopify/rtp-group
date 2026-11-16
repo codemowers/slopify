@@ -1,0 +1,8 @@
+#!/bin/sh
+# Generate once, preserve operator overrides and sysupgrade-restored settings.
+set -eu
+[ -z "$(uci -q get slopify.player.rtp_send_group || true)" ] || exit 0
+read -r uuid < /proc/sys/kernel/random/uuid
+value=$((0x${uuid%%-*}))
+uci set "slopify.player.rtp_send_group=239.192.$(((value >> 8) & 255)).$((value & 255)):5004"
+uci commit slopify

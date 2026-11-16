@@ -1,0 +1,23 @@
+#!/bin/sh
+. /lib/functions.sh
+. /usr/libexec/slopify/common.sh
+config_load slopify
+name="$(slopify_name | tr -d '\000-\037\177')"
+card="$(slopify_card)"
+state="$(/etc/init.d/slopify-player status 2>/dev/null)"
+address="$(ubus call network.interface.lan status 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)"
+[ -n "$address" ] || address="$(uci -q get system.@system[0].hostname).local"
+config_get listen player local_listen ':80'
+printf '  Speaker: %s\n  Player:  %s\n  Output:  %s\n' "$name" "${state:-stopped}" "${card:-none}"
+port="${listen##*:}"
+case "$port" in ''|*[!0-9]*) ;; *) printf '  Web UI:  http://%s:%s/\n' "$address" "$port" ;; esac
+setup="$(uci -q get uhttpd.main.listen_http)"
+setup="${setup%% *}"
+setup="${setup##*:}"
+printf '  Setup:   http://%s:%s/cgi-bin/luci/admin/services/slopify\n' "$address" "${setup:-8080}"
+config_get_bool receive player rtp 0
+config_get_bool send player rtp_send 0
+config_get group player rtp_send_group
+[ "$receive" = 0 ] || printf '  RTP:     receiving SAP announcements\n'
+[ "$send" = 0 ] || printf '  RTP:     sending to %s\n' "$group"
+printf '\n  Service: /etc/init.d/slopify-player {status|restart}\n  Logs:    logread -e ujail\n\n'

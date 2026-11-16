@@ -1,20 +1,19 @@
-# Send only build inputs; exclude charts, local configuration and deploy tools.
+# Root context is shared by server and player Dockerfiles; exclude local data.
 **
 !go.mod
 !go.sum
-!cmd/
-!cmd/**
 !internal/
 !internal/**
-!web/
-!web/**
+!server/
+!server/cmd/
+!server/cmd/**
+!server/internal/
+!server/internal/**
+!server/web/
+!server/web/**
+!server/build/
+!server/build/*.Dockerfile
 !player/
 !player/**
 player/deploy/
-player/openwrt/
-player/shairport/
-!build/
-!build/*.Dockerfile
-!build/appliance/
-!build/appliance/**
-
+player/monitoring/

@@ -1,0 +1,75 @@
+# The player name is the OpenWrt system description
+# (uci set system.@system[0].description='Kitchen'), falling back to the hostname.
+
+config player 'player'
+	# Speaker status interval, milliseconds (100–10000); slower saves CPU.
+	option local_sse_interval_ms '200'
+	# Empty uses the architecture default: off on MIPS, on elsewhere.
+	option metrics ''
+	# Slopify origin, for example https://slopify.example.com. Empty plays LAN
+	# sources only, and needs local_listen.
+	option server ''
+	# ALSA card ID from /proc/asound/cards. auto prefers a USB DAC, then the
+	# first card that is not HDMI or the Pi headphone jack, and follows USB DAC hotplug.
+	option card 'auto'
+	# Explicitly allow 16-bit fallback for higher-precision audio. Off in all images.
+	option allow_truncate '0'
+	option cue_level_db '-6'
+	# Trusted-LAN speaker page and source selection. Empty disables both,
+	# along with the Pulse receiver.
+	option local_listen ':80'
+	# Trusted-LAN Pulse receiver on TCP 4713, advertised over mDNS. No authentication.
+	option pulse '1'
+	# Trusted-LAN ESound receiver on TCP 16001. No authentication.
+	option esound '0'
+	# Trusted-LAN UPnP renderer on TCP 49494 and UDP 1900. No authentication.
+	option upnp '0'
+	# Trusted-LAN AirPlay 1 (RAOP) receiver on TCP 5000 plus per-session UDP ports,
+	# advertised over mDNS. No authentication.
+	option raop '0'
+	# Encryption for iPhone, iPad and Mac. Downloads the RAOP key from the
+	# shairport-sync repository; the player accepts only the genuine key.
+	option raop_crypto '0'
+	# Trusted-LAN multicast RTP receiver, sessions announced over SAP. No authentication.
+	option rtp '0'
+	# Multicast Slopify audio over RTP, with track titles in clear text. No authentication.
+	option rtp_send '0'
+	option queue_share '0'
+	# ADDRESS or ADDRESS:PORT (default port 5004). Generated once and saved at boot.
+	option rtp_send_group ''
+	# ALSA buffer for LAN sources in ms, 40 to 2000. Empty lets the device choose,
+	# 40 to 80. Lower keeps video closer to sound; too low underruns.
+	option live_buffer_ms ''
+	# Input buffers in milliseconds; empty uses protocol defaults.
+	option pulse_buffer_ms ''
+	option esound_buffer_ms ''
+	option esound_socket_ms ''
+	option rtp_buffer_ms ''
+	option raop_buffer_ms ''
+	# Opt-in hardware volume (alsamixer displayed 0..100 scale). Leave empty
+	# to never read or set mixers. HiFiBerry Amp2: Digital, 0, 40, 20.
+	option volume_control ''
+	option volume_min '0'
+	option volume_max '40'
+	option volume_initial '10'
+	# Standard media keys use all /dev/input/event* devices automatically.
+	# Relative-axis volume is enabled only for the selected rotary encoder.
+	option rotary_input ''
+ # Kernel-decoded remote receiver, selected by physical identity in LuCI.
+ option ir_receiver ''
+ option ir_protocol 'rc5'
+ option ir_key_playpause ''
+ option ir_key_play ''
+ option ir_key_pause ''
+ option ir_key_previous ''
+ option ir_key_next ''
+ option ir_key_mute ''
+ option ir_key_volume_up ''
+ option ir_key_volume_down ''
+ # Only for receivers advertising tunable carrier/range support. GPIO
+ # demodulating receivers have a fixed hardware frequency (e.g. 36/38 kHz).
+ option ir_rx_carrier_min_khz ''
+ option ir_rx_carrier_max_khz ''
+# Pin every CPUFreq policy to the board's minimum supported frequency.
+config cpu 'cpu'
+	option minimum '1'

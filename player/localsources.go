@@ -67,11 +67,14 @@ type sourceInput struct {
 
 // sourceBuffer shows how full a source's queues are, for the speaker page.
 type sourceBuffer struct {
-	StreamMS    int    `json:"streamMs"`
-	StreamMaxMS int    `json:"streamMaxMs"`
-	DeviceMS    int    `json:"deviceMs"`
-	DeviceMaxMS int    `json:"deviceMaxMs"`
-	Underflows  uint64 `json:"underflows"`
+	Events       map[string]uint64 `json:"events,omitempty"`
+	SyncOffsetMS *int              `json:"syncOffsetMs,omitempty"`
+	StreamMS     int               `json:"streamMs"`
+	StreamMaxMS  int               `json:"streamMaxMs"`
+	DeviceMS     int               `json:"deviceMs"`
+	DeviceMaxMS  int               `json:"deviceMaxMs"`
+	Underflows   uint64            `json:"underflows"`
+	Overflows    uint64            `json:"overflows"`
 }
 
 type sourceOutputWindow struct {

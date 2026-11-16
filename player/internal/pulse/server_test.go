@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"github.com/codemowers/slopify/player/internal/pcmring"
 	"math"
 	"net"
 	"os"
@@ -232,14 +233,14 @@ func TestUnderflowCanAlwaysResume(t *testing.T) {
 	}
 }
 
-// A PipeWire tunnel steers reported latency to its target: device delay would starve it.
-func TestLatencyReplyLeavesOutDeviceDelay(t *testing.T) {
+// Timing replies add the device delay once; read/write indices cover the ring.
+func TestLatencyReplyReportsDeviceDelay(t *testing.T) {
 	c := &client{server: NewServer(Config{Name: "x"}), conn: discardConn{}, streams: map[uint32]*Stream{}, props: map[string]string{}}
 	s := newStream(c, 0, 0, FormatS32LE, 2, 48000, map[string]string{})
 	s.setAttr(unset, unset, unset, unset)
 	s.SetDeviceDelay(180_000)
 	r := &reader{b: s.latencyReply(&writer{}, 1, 2).b}
-	if got := r.usec(); r.err != nil || got != 0 {
+	if got := r.usec(); r.err != nil || got != 180_000 {
 		t.Fatalf("sink latency %d, %v", got, r.err)
 	}
 }
@@ -354,5 +355,82 @@ func TestDecodeCountsOnlyFloatBeyondFullScale(t *testing.T) {
 	s.Decode(make([]int32, len(samples)), raw)
 	if got := s.Stats().Clipped; got != 3 {
 		t.Fatalf("clipped %d, want 3", got)
+	}
+}
+
+func timingStream(t *testing.T) *Stream {
+	t.Helper()
+	c := &client{server: NewServer(Config{Name: "test"}), conn: discardConn{}, streams: map[uint32]*Stream{}, props: map[string]string{}}
+	s := newStream(c, 0, 0, FormatS16LE, 2, 48000, nil)
+	s.setAttr(unset, 19200, 0, 1920)
+	return s
+}
+
+func TestFlushRemovesDiscardedAudioFromTimingIndices(t *testing.T) {
+	s := timingStream(t)
+	data := make([]byte, 9600)
+	if err := s.receive(bytes.NewReader(data), uint32(len(data)), 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if n := s.Read(make([]byte, 1920)); n != 1920 {
+		t.Fatal(n)
+	}
+	read := s.readIndex
+	s.flush()
+	if s.written != read || s.readIndex != read || s.len != 0 {
+		t.Fatalf("flush left phantom queued audio: write=%d read=%d buffered=%d", s.written, s.readIndex, s.len)
+	}
+	if err := s.receive(bytes.NewReader(data), uint32(len(data)), 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if s.written-s.readIndex != int64(s.len) {
+		t.Fatal("refill timing diverged")
+	}
+	if s.Stats().Events[pcmring.EventFlush] != 1 {
+		t.Fatal("flush event missing")
+	}
+}
+
+func TestTimingReportsPlayedBytesAndControlEvents(t *testing.T) {
+	s := timingStream(t)
+	s.SetDeviceDelay(80000)
+	data := make([]byte, 19200)
+	if err := s.receive(bytes.NewReader(data), uint32(len(data)), 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	for range 12 {
+		if n := s.Read(make([]byte, 960)); n != 960 {
+			t.Fatal(n)
+		}
+	}
+	r := &reader{b: s.latencyReply(&writer{}, 1, 2).b}
+	r.usec()
+	r.usec()
+	if !r.boolean() {
+		t.Fatal("running stream reported paused")
+	}
+	r.timeval()
+	r.timeval()
+	read64 := func(tag byte) uint64 {
+		if !r.tag(tag) {
+			t.Fatalf("invalid timing field: %v", r.err)
+		}
+		return binary.BigEndian.Uint64(r.bytes(8))
+	}
+	read64(tagS64)
+	read64(tagS64)
+	read64(tagU64)
+	if got := read64(tagU64); got != 11520 || r.err != nil {
+		t.Fatalf("played bytes=%d, error=%v", got, r.err)
+	}
+	s.setCorked(true)
+	s.setCorked(true)
+	s.setCorked(false)
+	events := s.Stats().Events
+	if events[pcmring.EventCork] != 1 || events[pcmring.EventUncork] != 1 || events[pcmring.EventTiming] != 1 {
+		t.Fatalf("events=%v", events)
+	}
+	if s.playingFor != 0 {
+		t.Fatal("cork did not reset playback interval")
 	}
 }

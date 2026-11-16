@@ -26,5 +26,10 @@ spec:
   tokenEndpointAuthMethod: client_secret_basic
   allowedResources:
     - https://{{ .Values.domain }}/api
+  {{- if .Values.allowAllUsers }}
+  allowedUsers: []
+  allowedGroups: []
+  {{- else }}
   allowedUsers:
-    {{- required "Set allowedUsers in your private Helm values file" .Values.allowedUsers | toYaml | nindent 4 }}
+    {{- required "Set allowedUsers or explicitly enable allowAllUsers" .Values.allowedUsers | toYaml | nindent 4 }}
+  {{- end }}

@@ -1,0 +1,21 @@
+#!/bin/sh
+# Migrate the stock HTTP port pair once. Preserve customized listen addresses
+# and leave LuCI's HTTPS configuration alone.
+listen="$(uci -q get slopify.player.local_listen)"
+case "$listen" in :80|:8080) ;; *) exit 0 ;; esac
+endpoints="$(uci -q get uhttpd.main.listen_http)"
+[ -n "$endpoints" ] || exit 0
+changed=0
+for endpoint in $endpoints; do
+ case "$endpoint" in *:80) changed=1 ;; esac
+done
+[ "$changed" = 1 ] || exit 0
+uci -q delete uhttpd.main.listen_http
+for endpoint in $endpoints; do
+ case "$endpoint" in *:80) endpoint="${endpoint%:80}:8080" ;; esac
+ uci add_list "uhttpd.main.listen_http=$endpoint"
+done
+uci set slopify.player.local_listen=':80'
+uci commit uhttpd
+uci commit slopify
+exit 0

@@ -1,0 +1,3 @@
+#!/usr/bin/lua
+assert(#arg == 2, 'Expected overlay and revision')
+dofile('/usr/libexec/slopify/hat.lua').run('set', arg[1], arg[2])

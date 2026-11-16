@@ -1,0 +1,4 @@
+# Fetch the AirPlay encryption key once the LAN is up, if it is wanted and missing.
+[ "$ACTION" = ifup ] && [ "$INTERFACE" = lan ] || exit 0
+/usr/libexec/slopify/raop-key >/dev/null 2>&1 &
+exit 0

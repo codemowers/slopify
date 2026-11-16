@@ -1,0 +1,2 @@
+#!/usr/bin/lua
+dofile('/usr/libexec/slopify/hat.lua').run('info')

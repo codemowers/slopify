@@ -1,0 +1,11 @@
+# Re-expand event devices at startup; coalesce a keyboard's multiple interfaces.
+case "$DEVNAME" in input/event[0-9]*) ;; *) exit 0 ;; esac
+case "$ACTION" in add|remove) ;; *) exit 0 ;; esac
+/etc/init.d/slopify-player running || exit 0
+mkdir /var/run/slopify-input-restart 2>/dev/null || exit 0
+(
+ sleep 1
+ rmdir /var/run/slopify-input-restart
+ /etc/init.d/slopify-player running || exit 0
+ /etc/init.d/slopify-player restart
+) </dev/null >/dev/null 2>&1 &

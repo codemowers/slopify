@@ -1,5 +1,5 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: {{ ternary "StatefulSet" "Deployment" .Values.persistentWorkloads }}
 metadata:
   name: slopify-catalog
   labels: &labels
@@ -8,8 +8,12 @@ metadata:
 spec:
   replicas: 1
   # Pods mount the node-local media volume; replace them rather than overlap.
+  {{- if .Values.persistentWorkloads }}
+  serviceName: slopify-catalog
+  {{- else }}
   strategy:
     type: Recreate
+  {{- end }}
   selector:
     matchLabels: *labels
   template:
@@ -27,6 +31,10 @@ spec:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: catalog
           image: "{{ if .Values.imageRepository }}{{ .Values.imageRepository }}/{{ end }}{{ .Values.images.catalog }}"

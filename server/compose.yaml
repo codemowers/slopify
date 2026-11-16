@@ -1,0 +1,138 @@
+# Local-machine example using Linux host networking.
+# Set XDG_MUSIC_DIR, XDG_VIDEOS_DIR and STREAM_SIGNING_KEY in a private .env.
+# Generate a signing key with: openssl rand -hex 32
+# Start with: docker compose --env-file .env -f server/compose.yaml up -d --build
+name: slopify
+
+x-service: &service
+  network_mode: host
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+
+x-auth: &auth
+  SLOPIFY_ANONYMOUS: "true"
+
+x-signing: &signing
+  STREAM_SIGNING_KEY: ${STREAM_SIGNING_KEY:?Set STREAM_SIGNING_KEY in .env}
+
+x-media: &media
+  - type: bind
+    source: ${XDG_MUSIC_DIR:?Set media directory paths in .env}
+    target: /media/Music
+    read_only: true
+    bind:
+      create_host_path: false
+  - type: bind
+    source: ${XDG_VIDEOS_DIR:?Set media directory paths in .env}
+    target: /media/Videos
+    read_only: true
+    bind:
+      create_host_path: false
+
+services:
+  indexer:
+    <<: *service
+    build:
+      context: ..
+      dockerfile: server/build/indexer.Dockerfile
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    environment:
+      LISTEN_ADDR: 127.0.0.1:18081
+      METRICS_LISTEN_ADDR: 127.0.0.1:19090
+    tmpfs: ["/media:uid=${LOCAL_UID:-1000},gid=${LOCAL_GID:-1000},mode=0755,size=16m"]
+    volumes:
+      - type: bind
+        source: ${XDG_MUSIC_DIR}
+        target: /media/Music
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${XDG_VIDEOS_DIR}
+        target: /media/Videos
+        bind:
+          create_host_path: false
+  catalog:
+    <<: *service
+    build:
+      context: ..
+      dockerfile: server/build/catalog.Dockerfile
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    environment:
+      <<: *auth
+      LISTEN_ADDR: 127.0.0.1:18082
+      INDEXER_EVENTS_URL: http://127.0.0.1:18081/v1/events
+    volumes: *media
+  players:
+    <<: *service
+    build:
+      context: ..
+      dockerfile: server/build/players.Dockerfile
+    environment:
+      <<: [*auth, *signing]
+      LISTEN_ADDR: 127.0.0.1:18083
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:8080}
+    volumes: [players:/data]
+  streamer:
+    <<: *service
+    build:
+      context: ..
+      dockerfile: server/build/streamer.Dockerfile
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    environment:
+      <<: *signing
+      LISTEN_ADDR: 127.0.0.1:18084
+    volumes: *media
+  frontend:
+    <<: *service
+    build:
+      context: ..
+      dockerfile: server/build/frontend.Dockerfile
+    environment:
+      <<: *auth
+      LISTEN_ADDR: 127.0.0.1:18085
+  video:
+    <<: *service
+    build: &transcoder-build
+      context: ..
+      dockerfile: server/build/transcoder.Dockerfile
+    environment:
+      <<: *signing
+      LISTEN_ADDR: 127.0.0.1:18086
+      ORIGINALS_URL: http://127.0.0.1:18084
+      TRANSCODE_PROFILE: video-aac-192
+      TRANSCODE_CACHE_MAX_BYTES: "0"
+    tmpfs: [/tmp:size=64m]
+  opus:
+    <<: *service
+    build: *transcoder-build
+    environment:
+      <<: *signing
+      LISTEN_ADDR: 127.0.0.1:18087
+      ORIGINALS_URL: http://127.0.0.1:18084
+      TRANSCODE_PROFILE: opus-128
+      TRANSCODE_CACHE_MAX_BYTES: "0"
+    tmpfs: [/tmp:size=64m]
+  mp3:
+    <<: *service
+    build: *transcoder-build
+    environment:
+      <<: *signing
+      LISTEN_ADDR: 127.0.0.1:18088
+      ORIGINALS_URL: http://127.0.0.1:18084
+      TRANSCODE_PROFILE: mp3-192
+      TRANSCODE_CACHE_MAX_BYTES: "0"
+    tmpfs: [/tmp:size=64m]
+  http:
+    <<: *service
+    image: nginx:alpine
+    user: "65532:65532"
+    command: [nginx, -g, "daemon off;"]
+    entrypoint: []
+    tmpfs: [/tmp:size=32m]
+    volumes: [./server/deploy/compose/nginx.conf:/etc/nginx/nginx.conf:ro]
+    depends_on: [frontend, catalog, players, streamer, video, opus, mp3]
+
+volumes:
+  players:

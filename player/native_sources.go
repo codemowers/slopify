@@ -16,6 +16,7 @@ import (
 	"github.com/codemowers/slopify/internal/volume"
 	"github.com/codemowers/slopify/player/internal/audiometer"
 	"github.com/codemowers/slopify/player/internal/esound"
+	"github.com/codemowers/slopify/player/internal/pcmring"
 	"github.com/codemowers/slopify/player/internal/pulse"
 	"github.com/codemowers/slopify/player/internal/rtp"
 	"github.com/codemowers/slopify/player/internal/upnp"
@@ -92,9 +93,16 @@ func (r *nativeRouter) selectSourceWithCue(id string, sound bool) {
 }
 
 func (r *nativeRouter) owns(id string) bool {
+	return r.deviceFor(id) != nil
+}
+
+func (r *nativeRouter) deviceFor(id string) *nativeDevice {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.owner == id && r.device != nil
+	if r.owner != id {
+		return nil
+	}
+	return r.device
 }
 
 func (r *nativeRouter) reportDevice(output *localPCM) {
@@ -247,6 +255,9 @@ func (p *nativeFillPacer) reset() { p.started = time.Time{} }
 func (p *nativeFillPacer) wait(next time.Time, frames, rate int, delay time.Duration, now time.Time) time.Time {
 	if p.started.IsZero() {
 		p.started = now
+		// A source switch or reopen can leave the old deadline behind now.
+		// Catching up on that deadline would drain the sender in a burst.
+		next = now
 	}
 	// Past the fill, only a device running short may read ahead of the clock, so
 	// that clock drift never starves it.
@@ -527,6 +538,9 @@ func (l *nativeLAN) consume(ctx context.Context, consumer *nativeConsumer) {
 	input := audio(stageInput, id)
 	if metricsEnabled {
 		metricRate.WithLabelValues(input...).Set(float64(pcm.rate))
+		for event := range pcmring.StreamEventCount {
+			metricStreamEvents.WithLabelValues(append(audio(stageInput, id), event.String())...).Add(0)
+		}
 		defer metricRate.DeleteLabelValues(input...)
 	}
 	if metricsEnabled {
@@ -536,6 +550,7 @@ func (l *nativeLAN) consume(ctx context.Context, consumer *nativeConsumer) {
 		})
 	}
 	var lastUnderflows, lastOverflows, lastClipped, lastLost uint64
+	var lastEvents [pcmring.StreamEventCount]uint64
 	lastPass := time.Now()
 	defer func() {
 		consumer.cancel()
@@ -568,6 +583,7 @@ func (l *nativeLAN) consume(ctx context.Context, consumer *nativeConsumer) {
 	}}
 	var next time.Time
 	var fill nativeFillPacer
+	var device *nativeDevice
 	lastAudio := time.Now()
 	for ctx.Err() == nil {
 		select {
@@ -578,12 +594,18 @@ func (l *nativeLAN) consume(ctx context.Context, consumer *nativeConsumer) {
 		n := stream.Read(raw)
 		stats := stream.Stats()
 		if metricsEnabled {
+			for event, count := range stats.Events {
+				if delta := count - lastEvents[event]; delta > 0 {
+					metricStreamEvents.WithLabelValues(append(audio(stageInput, id), pcmring.StreamEvent(event).String())...).Add(float64(delta))
+				}
+			}
 			metricUnderruns.WithLabelValues(input...).Add(float64(stats.Underflows - lastUnderflows))
 			metricOverflows.WithLabelValues(input...).Add(float64(stats.Overflows - lastOverflows))
 			metricClipped.WithLabelValues(input...).Add(float64(stats.Clipped - lastClipped))
 			metricLostFrames.WithLabelValues(input...).Add(float64(stats.Lost - lastLost))
 		}
 		lastUnderflows, lastOverflows, lastClipped, lastLost = stats.Underflows, stats.Overflows, stats.Clipped, stats.Lost
+		lastEvents = stats.Events
 		passAt := time.Now()
 		if metricsEnabled {
 			metricLoopGap.WithLabelValues(audio(stageOutput, id)...).Observe(passAt.Sub(lastPass).Seconds())
@@ -592,6 +614,7 @@ func (l *nativeLAN) consume(ctx context.Context, consumer *nativeConsumer) {
 		if n == 0 {
 			if time.Since(lastAudio) > nativeSourceIdle {
 				l.router.release(id, false) // A silent tunnel does not hold the DAC.
+				stream.SetDeviceDelay(0)
 			}
 			peaks.release(time.Now())
 			select {
@@ -616,6 +639,10 @@ func (l *nativeLAN) consume(ctx context.Context, consumer *nativeConsumer) {
 		delay := time.Duration(0)
 		switch {
 		case err == nil:
+			if current := l.router.deviceFor(id); current != device {
+				device = current
+				fill.reset()
+			}
 			if metricsEnabled {
 				metricWriteTime.WithLabelValues(audio(stageOutput, id)...).Observe(time.Since(writeAt).Seconds())
 			}
@@ -674,6 +701,17 @@ func (l *nativeLAN) bufferStatus(p *speakerSource) *sourceBuffer {
 		stats := consumer.stream.Stats()
 		buffer.StreamMS, buffer.StreamMaxMS = int(stats.BufferedUsec/1000), int(stats.TargetUsec/1000)
 		buffer.Underflows = stats.Underflows
+		buffer.Overflows = stats.Overflows
+		if consumer.stream.Protocol() == "pulse" {
+			buffer.Events = make(map[string]uint64, pcmring.StreamEventCount)
+			for event, count := range stats.Events {
+				buffer.Events[pcmring.StreamEvent(event).String()] = count
+			}
+		}
+		if consumer.stream.Protocol() == "pulse" && buffer.DeviceMaxMS > 0 {
+			offset := buffer.StreamMS + buffer.DeviceMS
+			buffer.SyncOffsetMS = &offset
+		}
 	}
 	if buffer.StreamMaxMS == 0 && buffer.DeviceMaxMS == 0 {
 		return nil

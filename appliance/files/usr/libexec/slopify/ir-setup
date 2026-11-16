@@ -1,0 +1,16 @@
+#!/bin/sh
+# Only root's persisted UCI configuration is passed to the bounded Go helper.
+set -eu
+receiver="$(uci -q get slopify.player.ir_receiver || true)"
+[ -n "$receiver" ] || exit 0
+protocol="$(uci -q get slopify.player.ir_protocol || true)"
+set -- /usr/bin/slopify-ir ir-setup -receiver "$receiver" -protocol "${protocol:-rc5}"
+for action in playpause play pause previous next mute volume_up volume_down; do
+ value="$(uci -q get "slopify.player.ir_key_$action" || true)"
+ set -- "$@" "-$action" "$value"
+done
+for bound in min max; do
+ value="$(uci -q get "slopify.player.ir_rx_carrier_${bound}_khz" || true)"
+ [ -z "$value" ] || set -- "$@" "-carrier-$bound-khz" "$value"
+done
+exec "$@"

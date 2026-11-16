@@ -1,0 +1,10 @@
+#!/bin/sh
+# Sound cards, volume controls and input devices for the LuCI panel, as JSON.
+. /usr/libexec/slopify/common.sh
+inputs="$(/usr/bin/slopify-player input-info)"
+ir_setup=false
+if command -v ir-keytable >/dev/null 2>&1 && [ -d /sys/class/rc ] && [ -x /usr/bin/slopify-ir ]; then
+	ir_setup=true
+fi
+printf '{"auto":"%s","cards":%s,"inputs":%s,"irSetup":%s}\n' \
+	"$(slopify_auto_card)" "$(/usr/bin/slopify-player -list-audio)" "$inputs" "$ir_setup"

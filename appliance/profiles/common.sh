@@ -1,0 +1,4 @@
+# Wired DHCP client by default, optional Wi-Fi via LuCI; no DHCP/RA server, PPP or firewall. Dropbear for SSH
+# (LuCI manages its keys, including FIDO sk-* keys) and ttyd as a LuCI web shell. LuCI without luci-light, which pulls in the firewall.
+SLOPIFY_COMMON_PACKAGES="kmod-tcp-bbr prometheus-node-exporter-lua prometheus-node-exporter-lua-thermal prometheus-node-exporter-lua-netstat prometheus-node-exporter-lua-openwrt prometheus-node-exporter-lua-filesystem procd-ujail kmod-usb-audio avahi-dbus-daemon alsa-utils lua luci-lib-nixio luci-lib-jsonc luci-mod-admin-full luci-proto-ipv6 luci-theme-bootstrap rpcd-mod-rrdns uhttpd uhttpd-mod-ubus dropbear ttyd luci-app-ttyd -firewall4 -nftables -kmod-nft-offload -dnsmasq -odhcpd-ipv6only -ppp -ppp-mod-pppoe wpad-basic-mbedtls iw iwinfo rpcd-mod-iwinfo"
+slopify_prepare() { :; }
