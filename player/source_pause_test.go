@@ -127,3 +127,25 @@ func TestRestoredLANSelectionDoesNotPausePlayback(t *testing.T) {
 		t.Fatal("restoring source selection was treated as a new switch")
 	}
 }
+
+func TestDetachedPinRequestsRejoinWithoutOldTrack(t *testing.T) {
+	c := &controller{sources: newSpeakerSources(""), sourcePause: make(chan sourcePauseIntent, 1), desired: &state{Adopted: true, State: "stopped", Version: 8}}
+	c.requestSourcePause()
+	if len(c.sourcePause) != 0 {
+		t.Fatal("automatic selection rejoined")
+	}
+	c.sources.resumeRevision = c.sources.Revision
+	c.requestSourcePause()
+	select {
+	case intent := <-c.sourcePause:
+		if intent.Op != "play-if-sole-output" || intent.Version != 8 || intent.Entry != 0 {
+			t.Fatalf("wrong rejoin: %+v", intent)
+		}
+	default:
+		t.Fatal("explicit pin did not rejoin")
+	}
+	c.requestSourcePause()
+	if len(c.sourcePause) != 0 {
+		t.Fatal("rejoin replayed")
+	}
+}

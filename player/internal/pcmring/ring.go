@@ -7,6 +7,16 @@ import (
 	"time"
 )
 
+// Stats describes a live stream's buffering for display and metrics. Each receiver
+// fills what it can know; zero means none.
+type Stats struct {
+	BufferedUsec, TargetUsec uint64
+	Underflows               uint64
+	Overflows                uint64 // Audio discarded because the sender outran the output.
+	Clipped                  uint64
+	Lost                     uint64 // Frames that never arrived, played as silence.
+}
+
 // Ring holds whole-frame PCM bytes.
 type Ring struct {
 	frame     int
@@ -56,6 +66,59 @@ func (r *Ring) Write(b []byte) bool {
 		b = b[n:]
 	}
 	return true
+}
+
+// WriteLatest stores b without blocking, for a sender that cannot be held back. When
+// b does not fit it discards the oldest audio down to the start threshold, which keeps
+// the delay bounded, and reports the bytes discarded. It reports false once closed.
+func (r *Ring) WriteLatest(b []byte) (discarded int, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return 0, false
+	}
+	now := time.Now()
+	if !r.lastAt.IsZero() && r.observe != nil {
+		r.observe(now.Sub(r.lastAt))
+	}
+	r.lastAt = now
+	if len(b) > len(r.ring) {
+		discarded = len(b) - len(r.ring)
+		b = b[discarded:]
+	}
+	if r.size+len(b) > len(r.ring) {
+		keep := min(max(r.threshold-len(b), 0), len(r.ring)-len(b))
+		keep -= keep % r.frame
+		discarded += r.size - keep
+		r.head = (r.head + r.size - keep) % len(r.ring)
+		r.size = keep
+	}
+	tail := (r.head + r.size) % len(r.ring)
+	n := copy(r.ring[tail:], b)
+	copy(r.ring, b[n:])
+	r.size += len(b)
+	return discarded, true
+}
+
+// Trim discards the oldest audio beyond keep bytes, returning a drifted stream to its
+// intended delay at a moment when a jump is not heard as a fault.
+func (r *Ring) Trim(keep int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if drop := r.size - keep; drop > 0 {
+		drop -= drop % r.frame
+		r.head = (r.head + drop) % len(r.ring)
+		r.size -= drop
+		r.space.Broadcast()
+	}
+}
+
+// Clear discards everything held and buffers afresh, for a sender that has jumped.
+func (r *Ring) Clear() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.head, r.size, r.prebuf = 0, 0, true
+	r.space.Broadcast()
 }
 
 // Finish marks the end of the writer's data; what is buffered still plays.

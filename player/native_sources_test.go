@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/codemowers/slopify/player/internal/pcmring"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -13,8 +14,12 @@ import (
 
 	"github.com/codemowers/slopify/internal/volume"
 	"github.com/codemowers/slopify/player/internal/pulse"
+	"github.com/codemowers/slopify/player/internal/rtp"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+func (r *nativeRouter) selectSource(id string) { r.selectSourceWithCue(id, false) }
 
 // routerDevices records every device a router opens and what reaches it.
 type routerDevices struct {
@@ -161,15 +166,34 @@ func TestSenderKeyStableAndNamedByHost(t *testing.T) {
 }
 
 func TestMetricsAreBoundedAndServed(t *testing.T) {
-	metricStreamBuffer.WithLabelValues("lan_1").Observe(80)
-	metricDeviceUnderruns.Add(0)
+	metricBuffer.WithLabelValues(stageInput, "pulse", "lan_1").Observe(80)
+	metricUnderruns.WithLabelValues(audio(stageOutput, "slopify")...).Add(0)
 	w := httptest.NewRecorder()
 	promhttp.HandlerFor(nativeMetricsRegistry, promhttp.HandlerOpts{}).ServeHTTP(w, httptest.NewRequest("GET", "/metrics", nil))
 	body := w.Body.String()
-	for _, want := range []string{"slopify_audio_stream_buffer_ms_bucket", `source="lan_1"`, "slopify_audio_device_underruns_total", "go_gc_duration_seconds"} {
+	for _, want := range []string{"slopify_audio_buffer_seconds_bucket", `stage="input"`, `transport="pulse"`, `source="lan_1"`, "slopify_audio_underruns_total", "go_gc_duration_seconds"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing %s", want)
 		}
+	}
+}
+
+// Multicast counters share families with the labelled vectors; a mismatch would
+// only show at scrape time, as a gather error.
+func TestMulticastMetricsShareFamilies(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(metricOverflows, metricErrors, senderCollector{func() rtp.SenderStatus { return rtp.SenderStatus{Packets: 7, Discards: 2} }})
+	metricOverflows.WithLabelValues(stageInput, "pulse", "lan_1").Add(1)
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]int{}
+	for _, f := range families {
+		found[f.GetName()] = len(f.GetMetric())
+	}
+	if found["slopify_audio_overflows_total"] < 2 || found["slopify_audio_packets_total"] != 1 {
+		t.Fatalf("families %v", found)
 	}
 }
 
@@ -225,7 +249,7 @@ func (s *fakeLiveStream) PCM() livePCM {
 }
 func (s *fakeLiveStream) Decode(dst []int32, b []byte) int   { return len(b) / 2 }
 func (s *fakeLiveStream) Done() <-chan struct{}              { return s.ended }
-func (s *fakeLiveStream) Stats() pulse.Stats                 { return pulse.Stats{} }
+func (s *fakeLiveStream) Stats() pcmring.Stats               { return pcmring.Stats{} }
 func (s *fakeLiveStream) ObserveReceive(func(time.Duration)) {}
 func (s *fakeLiveStream) SetDeviceDelay(uint64)              {}
 func (s *fakeLiveStream) Close()                             {}
@@ -268,5 +292,32 @@ func TestReplacementWaitsForPreviousWriter(t *testing.T) {
 			t.Fatal("replacement never started")
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestSourceLabelsUsePeerAddressAndStayBounded(t *testing.T) {
+	noteSource("lan_91", "pulse", "10.0.0.5", "")
+	if got := audio(stageInput, "lan_91"); fmt.Sprint(got) != "[input pulse 10.0.0.5]" {
+		t.Fatal(got)
+	}
+	// One host on two groups stays two sources; the port is not part of identity.
+	noteSource("lan_92", "rtp", "10.0.0.6", "239.192.1.1:5004")
+	noteSource("lan_93", "rtp", "10.0.0.6", "239.192.1.2")
+	if a, b := audio(stageInput, "lan_92")[2], audio(stageInput, "lan_93")[2]; a != "10.0.0.6@239.192.1.1" || b != "10.0.0.6@239.192.1.2" {
+		t.Fatal(a, b)
+	}
+	if got := audio(stageInput, "lan_92")[1]; got != "multicast" {
+		t.Fatal(got)
+	}
+	// A name rather than an address never becomes a label.
+	noteSource("lan_94", "upnp", "evil.example\nname", "")
+	if got := audio(stageInput, "lan_94")[2]; got != "lan_94" {
+		t.Fatal(got)
+	}
+	// Another sender taking the slot drops the previous one's series.
+	metricUnderruns.WithLabelValues(audio(stageInput, "lan_91")...).Inc()
+	noteSource("lan_91", "pulse", "10.0.0.7", "")
+	if n := metricUnderruns.DeletePartialMatch(prometheus.Labels{"source": "10.0.0.5"}); n != 0 {
+		t.Fatal("previous sender's series survived the slot change")
 	}
 }

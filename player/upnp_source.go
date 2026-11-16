@@ -16,7 +16,6 @@ import (
 
 	"github.com/codemowers/slopify/player/internal/audiodec"
 	"github.com/codemowers/slopify/player/internal/pcmring"
-	"github.com/codemowers/slopify/player/internal/pulse"
 )
 
 const (
@@ -285,10 +284,10 @@ func (s *upnpStream) Decode(dst []int32, raw []byte) int {
 
 func (s *upnpStream) Done() <-chan struct{} { return s.ring.Done() }
 
-func (s *upnpStream) Stats() pulse.Stats {
+func (s *upnpStream) Stats() pcmring.Stats {
 	size, underflows := s.ring.Stats()
 	rate := uint64(s.format.Rate) * uint64(s.format.Channels) * 4
-	return pulse.Stats{BufferedUsec: uint64(size) * 1_000_000 / rate, TargetUsec: upnpBufferMillis * 1000, Underflows: underflows}
+	return pcmring.Stats{BufferedUsec: uint64(size) * 1_000_000 / rate, TargetUsec: upnpBufferMillis * 1000, Underflows: underflows}
 }
 
 func (s *upnpStream) ObserveReceive(observe func(time.Duration)) { s.ring.Observe(observe) }

@@ -57,26 +57,6 @@ func localMutation(w http.ResponseWriter, r *http.Request, command any) bool {
 	return true
 }
 
-func (c *controller) localAmpCommand(w http.ResponseWriter, r *http.Request) {
-	var command struct {
-		Delta int `json:"delta"`
-	}
-	if !localMutation(w, r, &command) {
-		return
-	}
-	if c.amp == nil {
-		http.Error(w, "Amplifier control disabled", http.StatusConflict)
-		return
-	}
-	if command.Delta != 1 && command.Delta != -1 {
-		http.Error(w, "Delta must be 1 or -1", http.StatusBadRequest)
-		return
-	}
-	c.amp.adjust(command.Delta)
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(c.amp.status())
-}
-
 func (c *controller) localVolumeCommand(w http.ResponseWriter, r *http.Request) {
 	var command struct {
 		Level *int  `json:"level"`

@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/codemowers/slopify/player/internal/cleantext"
 	"io"
 	"log/slog"
 	"net"
@@ -17,7 +18,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode"
 
 	"github.com/codemowers/slopify/player/internal/pcmring"
 )
@@ -269,19 +269,7 @@ func cleanName(b []byte) string {
 	if i := strings.IndexByte(string(b), 0); i >= 0 {
 		b = b[:i]
 	}
-	name := strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
-			return -1
-		}
-		return r
-	}, strings.ToValidUTF8(string(b), ""))
-	return strings.TrimSpace(name)
-}
-
-// Stats describes a stream's buffer.
-type Stats struct {
-	BufferedUsec, TargetUsec uint64
-	Underflows               uint64
+	return cleantext.Line(string(b), nameMax)
 }
 
 // Stream is one client's PCM stream.
@@ -339,10 +327,10 @@ func (s *Stream) limitSocket(millis int) {
 func (s *Stream) frameSize() int { return s.Channels * BytesPerSample(s.Format) }
 
 // Stats returns the buffer's current state.
-func (s *Stream) Stats() Stats {
+func (s *Stream) Stats() pcmring.Stats {
 	size, underflows := s.Ring.Stats()
 	rate := uint64(s.Rate) * uint64(s.frameSize())
-	return Stats{BufferedUsec: uint64(size) * 1_000_000 / rate, TargetUsec: uint64(s.server.config.BufferMillis) * 1000, Underflows: underflows}
+	return pcmring.Stats{BufferedUsec: uint64(size) * 1_000_000 / rate, TargetUsec: uint64(s.server.config.BufferMillis) * 1000, Underflows: underflows}
 }
 
 // ObserveReceive reports gaps between arrivals from the network.

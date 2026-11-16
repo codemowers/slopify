@@ -50,3 +50,40 @@ func TestInputPathFindsKernelNames(t *testing.T) {
 		}
 	}
 }
+
+// Reading every event node must not turn mouse motion into volume changes.
+func TestMediaOnlyInputIgnoresRelativeMotion(t *testing.T) {
+	devices, err := inputDevices([]string{"/dev/input/event2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := make([]byte, 8)
+	binary.NativeEndian.PutUint16(event, 2)
+	binary.NativeEndian.PutUint32(event[4:], 1)
+	if _, ok := decodeKnobEvent(event, devices["/dev/input/event2"]); ok {
+		t.Fatal("relative motion on a media-only device changed volume")
+	}
+	devices["/dev/input/event2"].rotary = true
+	if got, ok := decodeKnobEvent(event, devices["/dev/input/event2"]); !ok || got.delta != 1 {
+		t.Fatalf("selected rotary: %+v, %v", got, ok)
+	}
+}
+
+func TestMediaVolumeRepeatsButTransportDoesNot(t *testing.T) {
+	device := &inputDevice{keys: map[uint16]inputAction{keyVolumeUp: actionVolumeUp, keyVolumeDown: actionVolumeDown, keyPlayPause: actionPlayPause}}
+	for _, tc := range []struct {
+		key   uint16
+		value uint32
+		delta int
+		ok    bool
+	}{{keyVolumeUp, 1, 1, true}, {keyVolumeUp, 2, 1, true}, {keyVolumeDown, 2, -1, true}, {keyVolumeDown, 0, 0, false}, {keyPlayPause, 2, 0, false}} {
+		b := make([]byte, 8)
+		binary.NativeEndian.PutUint16(b, 1)
+		binary.NativeEndian.PutUint16(b[2:], tc.key)
+		binary.NativeEndian.PutUint32(b[4:], tc.value)
+		got, ok := decodeKnobEvent(b, device)
+		if ok != tc.ok || got.delta != tc.delta {
+			t.Fatalf("%+v -> %+v %v", tc, got, ok)
+		}
+	}
+}

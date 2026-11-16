@@ -1,7 +1,9 @@
-// Package audiodec decodes FLAC, WAV and MP3 originals in pure Go with integer
-// arithmetic only. Samples are returned as interleaved, left-justified signed
-// 32-bit words: widening is lossless and Format.Bits reports the source
-// precision. Nothing is resampled. Time offsets are the only floating-point values.
+// Package audiodec decodes FLAC, WAV, MP3 and Ogg Vorbis originals in pure Go.
+// Samples are returned as interleaved, left-justified signed 32-bit words:
+// widening is lossless and Format.Bits reports the source precision. Nothing is
+// resampled. Decoding uses integer arithmetic only, except for Vorbis, whose
+// reference maths is floating point; otherwise time offsets are the only
+// floating-point values.
 package audiodec
 
 import (
@@ -17,7 +19,7 @@ var ErrUnsupported = errors.New("unsupported audio format")
 // sources it is nominal, since they have no sample format of their own.
 type Format struct {
 	Rate, Channels, Bits int
-	Codec                string // FLAC, WAV or MP3
+	Codec                string // FLAC, WAV, MP3, Vorbis or ALAC
 	Lossy                bool
 }
 
@@ -28,21 +30,26 @@ type Decoder interface {
 	// io.EOF once the stream has ended.
 	Read(dst []int32) (int, error)
 	// Seek moves near the given offset in seconds and returns where it landed.
-	// FLAC and WAV are exact. MP3 has no timestamps: its result is an estimate,
+	// FLAC, WAV and Vorbis are exact. MP3 has no timestamps: its result is an estimate,
 	// close to exact for constant bitrate and rougher for variable bitrate.
 	Seek(seconds float64) (float64, error)
 }
 
-const (
-	maxID3Tags   = 8
-	mp3ScanLimit = 1 << 20 // bytes searched for the first frame after any tags
-	mp3ScanStep  = 64 << 10
-	mp3ScanMatch = 3 // consecutive consistent frames that identify a real start
-)
+// EncodedInput accounts for complete encoded frames and their decoded duration,
+// excluding reader prefetch and container tags. Implemented where frame sizes
+// and durations are known directly (MP3).
+type EncodedInput interface {
+	InputTotals() (bytes, frames uint64)
+}
+
+const maxID3Tags = 8
 
 // Open identifies an original by its content, not its name. ID3 tags are skipped
 // unread: display metadata comes from the Slopify catalog.
-func Open(r io.ReadSeeker) (Decoder, error) {
+func Open(r io.ReadSeeker) (Decoder, error) { return OpenWith(r, Options{}) }
+
+// OpenWith is Open with options, such as a receiver for damage worked around.
+func OpenWith(r io.ReadSeeker, opts Options) (Decoder, error) {
 	audio, magic, err := skipID3(r)
 	if err != nil {
 		return nil, err
@@ -52,15 +59,13 @@ func Open(r io.ReadSeeker) (Decoder, error) {
 	}
 	switch {
 	case string(magic[:4]) == "fLaC":
-		return openFLAC(r)
+		return openFLAC(r, audio, opts)
 	case string(magic[:4]) == "RIFF" && string(magic[8:12]) == "WAVE":
-		return openWAV(r)
+		return openWAVWith(r, opts)
+	case string(magic[:4]) == "OggS":
+		return openVorbis(r, opts)
 	}
-	start, err := findMP3Start(r, audio)
-	if err != nil {
-		return nil, err
-	}
-	return openMP3(r, start)
+	return openMP3Original(r, audio, opts)
 }
 
 // skipID3 returns the offset after any leading ID3v2 tags and the bytes found
@@ -88,51 +93,6 @@ func skipID3(r io.ReadSeeker) (int64, [12]byte, error) {
 		}
 	}
 	return offset, head, nil
-}
-
-// findMP3Start scans for consecutive Layer III frames, tolerating padding or junk
-// between tags and audio. It reads only as far as it needs.
-func findMP3Start(r io.ReadSeeker, from int64) (int64, error) {
-	if _, err := r.Seek(from, io.SeekStart); err != nil {
-		return 0, err
-	}
-	var buf []byte
-	atEnd := false
-	for pos := 0; pos < mp3ScanLimit; pos++ {
-		// Enough for the longest run of frames being checked.
-		for !atEnd && len(buf) < pos+mp3ScanMatch*2048 {
-			chunk := make([]byte, mp3ScanStep)
-			n, err := io.ReadFull(r, chunk)
-			buf = append(buf, chunk[:n]...)
-			atEnd = err != nil
-		}
-		if pos+4 > len(buf) {
-			break
-		}
-		if mp3FramesAt(buf, pos) {
-			return from + int64(pos), nil
-		}
-	}
-	return 0, ErrUnsupported
-}
-
-func mp3FramesAt(buf []byte, pos int) bool {
-	first, ok := parseMP3Header(buf[pos:])
-	if !ok {
-		return false
-	}
-	at := pos
-	for range mp3ScanMatch {
-		if at+4 > len(buf) {
-			return at > pos // Very short file: what exists was consistent.
-		}
-		h, ok := parseMP3Header(buf[at:])
-		if !ok || h.version != first.version || h.rateIndex != first.rateIndex || h.channel != first.channel {
-			return false
-		}
-		at += h.size
-	}
-	return true
 }
 
 // leftJustify widens a sample of the given precision to a full-scale word.

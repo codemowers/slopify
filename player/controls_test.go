@@ -92,3 +92,33 @@ func TestKnobActuatesWhileHTTPReportIsBlockedAndCoalescesLatest(t *testing.T) {
 		t.Fatal("latest volume never reported")
 	}
 }
+
+func TestMuteButtonDoesNotSendQueueCommand(t *testing.T) {
+	device := &fakeMixer{mapping: amp2Mapping, raw: amp2Raw}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m, err := startMixer(ctx, device, "card", "Digital", 0, 40, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &controller{mixer: m, knob: make(chan knobEvent, 1), buttons: make(chan string, 1), volumeWake: make(chan struct{}, 1)}
+	done := make(chan struct{})
+	go func() { defer close(done); c.runKnob(ctx) }()
+	defer func() { cancel(); <-done }()
+	for _, muted := range []bool{true, false} {
+		c.knob <- knobEvent{action: actionMute}
+		select {
+		case <-c.volumeWake:
+		case <-time.After(time.Second):
+			t.Fatal("mute not reported")
+		}
+		if c.mixer.snapshot().Muted != muted {
+			t.Fatalf("mute state not %v", muted)
+		}
+		select {
+		case op := <-c.buttons:
+			t.Fatalf("mute sent queue command %s", op)
+		default:
+		}
+	}
+}

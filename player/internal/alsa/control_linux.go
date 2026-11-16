@@ -13,6 +13,7 @@ import (
 	"strings"
 	"unsafe"
 
+	"github.com/codemowers/slopify/player/internal/linuxioctl"
 	"golang.org/x/sys/unix"
 )
 
@@ -67,7 +68,7 @@ type elemList struct {
 	reserved                   [50]byte
 }
 
-func iocControl(dir, nr, size uintptr) uintptr { return dir<<30 | size<<16 | 'U'<<8 | nr }
+func iocControl(dir, nr, size uintptr) uintptr { return linuxioctl.Request(dir, 'U', nr, size) }
 
 var (
 	iocElemList  = iocControl(3, 0x10, unsafe.Sizeof(elemList{}))

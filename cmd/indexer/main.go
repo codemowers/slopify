@@ -215,7 +215,7 @@ func (ix *indexer) indexDirectory(dir string, watch bool) ([]string, error) {
 					e.Tags, e.Duration, e.Codec = old.Tags, old.Duration, old.Codec
 					e.Bitrate, e.SampleRate, e.Channels, e.Bits = old.Bitrate, old.SampleRate, old.Channels, old.Bits
 					e.ProbeVersion, e.ProbeError = old.ProbeVersion, old.ProbeError
-					e.TagSource = old.TagSource
+					e.TagSource, e.Credits = old.TagSource, old.Credits
 					e.TagEncodingVersion = old.TagEncodingVersion
 					e.VideoCodec = old.VideoCodec
 					e.AudioCodecs, e.VideoCodecs = old.AudioCodecs, old.VideoCodecs
@@ -224,7 +224,7 @@ func (ix *indexer) indexDirectory(dir string, watch bool) ([]string, error) {
 					e.Tags, e.Duration, e.Codec = metadata.Tags, metadata.Duration, metadata.Codec
 					e.Bitrate, e.SampleRate, e.Channels, e.Bits = metadata.Bitrate, metadata.SampleRate, metadata.Channels, metadata.Bits
 					e.ProbeVersion = fileProbeVersion(kind)
-					e.TagSource = metadata.TagSource
+					e.TagSource, e.Credits = metadata.TagSource, metadata.Credits
 					e.TagEncodingVersion = 1
 					e.VideoCodec = metadata.VideoCodec
 					e.AudioCodecs, e.VideoCodecs = metadata.AudioCodecs, metadata.VideoCodecs
@@ -396,6 +396,7 @@ func (ix *indexer) probe(rel string) (probeMetadata, error) {
 		Disc: cmp.Or(leadingInt("disc"), leadingInt("discnumber")),
 	}
 	metadata.Codec = codec
+	metadata.Credits = credits(tags)
 	if !info.Empty() {
 		metadata.Tags = &info
 	}
@@ -503,12 +504,14 @@ func (ix *indexer) handle(ev fsnotify.Event) error {
 	return nil
 }
 
-const probeVersion = 2
+// Version 3 added credits (composer, copyright, MusicBrainz IDs...).
+const probeVersion = 3
 
 type probeMetadata struct {
 	AudioCodecs, VideoCodecs   []string
 	TagSource                  string
 	Tags                       *sidecar.Info
+	Credits                    *sidecar.Credits
 	Duration                   float64
 	Codec                      string
 	VideoCodec                 string
@@ -526,7 +529,7 @@ func probeWorkerCount() int {
 
 func fileProbeVersion(kind media.Kind) int {
 	if kind == media.Video {
-		return 4
+		return 5
 	}
 	return probeVersion
 }

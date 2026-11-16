@@ -15,6 +15,7 @@ import (
 
 	"github.com/codemowers/slopify/player/internal/alsa"
 	"github.com/codemowers/slopify/player/internal/audiodec"
+	"github.com/codemowers/slopify/player/internal/rtp"
 )
 
 const (
@@ -38,22 +39,33 @@ type nativeOutput interface {
 func nativeInputPCM(f format, codec string, lossy bool) localPCM {
 	input := localPCM{Codec: codec, Format: f.pcmName(), Rate: f.rate, Channels: f.channels}
 	if lossy {
+		input.DecodedBits = f.bits
 		input.Format = ""
 	}
 	return input
 }
 
-// nativeBackend decodes FLAC, WAV and MP3 in Go and writes to the device itself.
-// Entries it cannot decode go to fallback (mpv) when that is available.
+// nativeBackend decodes FLAC, WAV, MP3 and Vorbis in Go and writes to the device itself.
+// Unsupported formats fail visibly; decoding never uses an external process.
 type nativeBackend struct {
 	playbackServices
 	open     func(format) (nativeOutput, error)
 	openLive func(format) (nativeOutput, error)
 	client   *http.Client
-	fallback playbackBackend
+	// sender is the opt-in multicast copy of what this backend decodes.
+	sender *rtp.Sender
+	// readAhead bounds originals downloaded ahead of decoding; nil disables it.
+	readAhead *readAheadBudget
+
+	// cues reports whether locally generated sounds may mark a seek or fill a
+	// stall; nil allows them.
+	cues     func() bool
+	pauseCue func(format) error
+	startCue func(format) error
 
 	mu          sync.Mutex
 	unsupported map[uint64]bool
+	last        format // the most recent decoded format, for a seek cue
 
 	// Decoded audio waiting for the device, for display.
 	queuedSamples atomic.Int64
@@ -70,10 +82,13 @@ func (b *nativeBackend) queueFill() (queued, capacity int) {
 	return int(max(b.queuedSamples.Load(), 0) * 1000 / rate), int(nativeChunks * nativeChunkSamples * 1000 / rate)
 }
 
-func newNativeBackend(services playbackServices, output string, fallback playbackBackend) (playbackBackend, error) {
+func newNativeBackend(services playbackServices, output string) (*nativeBackend, error) {
 	kind, target, _ := strings.Cut(output, ":")
-	b := &nativeBackend{playbackServices: services, fallback: fallback, unsupported: map[uint64]bool{},
+	b := &nativeBackend{playbackServices: services, unsupported: map[uint64]bool{},
 		client: &http.Client{Timeout: 20 * time.Second}}
+	if readAheadBytes > 0 {
+		b.readAhead = newReadAheadBudget(readAheadBytes)
+	}
 	switch kind {
 	case "null":
 		b.open = func(f format) (nativeOutput, error) { return &nullOutput{f: f, start: time.Now()}, nil }
@@ -88,22 +103,16 @@ func newNativeBackend(services playbackServices, output string, fallback playbac
 		b.open = func(f format) (nativeOutput, error) { return openALSAOutput(target, f, false) }
 		b.openLive = func(f format) (nativeOutput, error) { return openALSAOutput(target, f, true) }
 	default:
-		return nil, fmt.Errorf("native playback supports alsa:hw:... and null outputs, not %q", kind)
+		return nil, fmt.Errorf("playback supports alsa:hw:... and null outputs, not %q", kind)
 	}
 	return b, nil
 }
 
-func (b *nativeBackend) Close() {
-	if b.fallback != nil {
-		b.fallback.Close()
-	}
-}
-
 func nativeCodec(e entry) bool {
 	// VideoCodec is ignored: audio files often carry cover art as a video stream.
-	// Decoders sniff the content, and real video containers go to the fallback.
+	// Decoders sniff the content and reject unsupported containers.
 	switch {
-	case e.Codec == "", e.Codec == "flac", e.Codec == "mp3", e.Codec == "pcm_s16le", e.Codec == "pcm_s24le", e.Codec == "pcm_s32le", e.Codec == "pcm_u8":
+	case e.Codec == "", e.Codec == "flac", e.Codec == "mp3", e.Codec == "vorbis", e.Codec == "pcm_s16le", e.Codec == "pcm_s24le", e.Codec == "pcm_s32le", e.Codec == "pcm_u8":
 		return true
 	}
 	return false
@@ -116,10 +125,22 @@ func (b *nativeBackend) handles(id uint64) bool {
 }
 
 func (b *nativeBackend) Start(id uint64, at float64) playbackSession {
-	if !b.handles(id) && b.fallback != nil {
-		return b.fallback.Start(id, at)
-	}
-	b.decodedState(format{}, "loading")
+	return b.start(id, at, false, false)
+}
+
+// StartSeek is Start for a seek within the playing entry, announced with a cue.
+func (b *nativeBackend) StartSeek(id uint64, at float64) playbackSession {
+	return b.start(id, at, true, false)
+}
+
+func (b *nativeBackend) StartAnnounced(id uint64, at float64) playbackSession {
+	return b.start(id, at, false, true)
+}
+
+func (b *nativeBackend) cuesAllowed() bool { return b.cues == nil || b.cues() }
+
+func (b *nativeBackend) start(id uint64, at float64, seek, announce bool) playbackSession {
+	b.decodedState("loading")
 	b.queuedSamples.Store(0)
 	b.samplesPerSec.Store(0)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -133,15 +154,19 @@ func (b *nativeBackend) Start(id uint64, at float64) playbackSession {
 	go func() {
 		defer close(s.done)
 		defer cancel()
-		defer b.decodedState(format{}, "idle")
+		defer b.decodedState("idle")
 		defer b.samplesPerSec.Store(0)
-		b.output(ctx, s, chunks)
+		b.output(ctx, s, chunks, seek && b.cuesAllowed(), announce)
 	}()
 	return s
 }
 
+// slopifyRateOwner is the session whose decoded rate the input rate metric shows.
+var slopifyRateOwner atomic.Pointer[session]
+
 // nativeChunk is decoded audio, a track boundary or a decode failure.
 type nativeChunk struct {
+	input   *sourceInput
 	entry   uint64
 	begin   *format
 	codec   string
@@ -164,17 +189,35 @@ func (b *nativeBackend) decodeQueue(ctx context.Context, s *session, id uint64, 
 			return false
 		}
 	}
+	var prepared *nextSource
+	defer func() { prepared.discard() }()
 	for first := true; ; first = false {
 		if !first && !b.handles(id) {
-			return // The controller starts the next entry on the right backend.
+			return // The controller reports the unsupported next entry separately.
 		}
-		err := b.decodeEntry(ctx, id, at, send)
+		var source *rangeSource
+		if prepared != nil && prepared.id == id {
+			select {
+			case <-prepared.done:
+				source = prepared.source // nil if preparing failed: open it again.
+			case <-ctx.Done():
+				return
+			}
+		} else {
+			prepared.discard()
+		}
+		next, err := b.decodeEntry(ctx, id, at, source, send)
+		prepared = next
 		at = 0
 		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			metricDecodeFailures.Inc()
+			reason := errorReason(err, "decode")
+			if errors.Is(err, audiodec.ErrUnsupported) {
+				reason = "unsupported"
+			}
+			errorAt(stageInput, "slopify", reason)
 			slog.Warn("native decoding stopped", "entry", id, "err", err)
 			if errors.Is(err, audiodec.ErrUnsupported) {
 				b.mu.Lock()
@@ -187,88 +230,227 @@ func (b *nativeBackend) decodeQueue(ctx context.Context, s *session, id uint64, 
 			send(nativeChunk{entry: id, failure: err})
 			return
 		}
-		next, ok := b.queue.after(id)
+		following, ok := b.queue.after(id)
 		if !ok {
 			return
 		}
-		id = next
+		id = following
 	}
 }
 
-func (b *nativeBackend) decodeEntry(ctx context.Context, id uint64, at float64, send func(nativeChunk) bool) error {
-	startedAt := time.Now()
+// nextSource is the following entry's original, opened and downloading ahead.
+type nextSource struct {
+	id     uint64
+	done   chan struct{}
+	source *rangeSource // set before done closes; nil on failure
+}
+
+// discard releases a prepared source that will not be played.
+func (n *nextSource) discard() {
+	if n == nil {
+		return
+	}
+	go func() {
+		<-n.done
+		if n.source != nil {
+			n.source.close()
+		}
+	}()
+}
+
+// prepareAfter starts downloading the entry after id, if this backend plays it.
+func (b *nativeBackend) prepareAfter(ctx context.Context, id uint64) *nextSource {
+	next, ok := b.queue.after(id)
+	if !ok || !b.handles(next) {
+		return nil
+	}
+	n := &nextSource{id: next, done: make(chan struct{})}
+	go func() {
+		defer close(n.done)
+		source, err := b.openSource(ctx, next)
+		if err != nil {
+			return
+		}
+		source.startReadAhead(b.readAhead)
+		n.source = source
+	}()
+	return n
+}
+
+func (b *nativeBackend) openSource(ctx context.Context, id uint64) (*rangeSource, error) {
 	url, err := b.streamURL(ctx, id)
 	if err != nil {
-		return errors.New("cannot obtain original")
+		return nil, sourceFailure("stream_url", "cannot obtain original")
 	}
-	source := &rangeSource{url: url, client: b.client, blocks: map[int64][]byte{}}
+	source := newRangeSource(url, b.client)
 	if _, err := source.block(ctx, 0); err != nil {
-		return err
+		return nil, err
 	}
-	dec, err := audiodec.Open(&sourceReader{source: source, ctx: ctx})
+	return source, nil
+}
+
+// decodeEntry decodes one entry, from source if it was prepared ahead. Once its
+// original is fully downloaded, it starts downloading the next entry's, which it
+// returns, even on failure, for the caller to use or discard.
+func (b *nativeBackend) decodeEntry(ctx context.Context, id uint64, at float64, source *rangeSource, send func(nativeChunk) bool) (next *nextSource, err error) {
+	startedAt := time.Now()
+	if source == nil {
+		if source, err = b.openSource(ctx, id); err != nil {
+			return nil, err
+		}
+	}
+	defer source.close()
+	if b.readAhead != nil {
+		prepared := make(chan *nextSource, 1)
+		decoded := make(chan struct{})
+		var watcher sync.WaitGroup
+		watcher.Go(func() {
+			select {
+			case <-source.complete:
+				prepared <- b.prepareAfter(ctx, id)
+			case <-decoded:
+			case <-ctx.Done():
+			}
+		})
+		defer func() {
+			close(decoded)
+			watcher.Wait()
+			select {
+			case next = <-prepared:
+			default:
+			}
+		}()
+	}
+	path := mediaPath(source.url)
+	reader := &sourceReader{source: source, ctx: ctx}
+	// undecodable reports a decoder that gave up on the content itself, rather than
+	// a fetch failure or cancellation.
+	undecodable := func(codec string, at float64, err error) {
+		if reader.failed == nil && ctx.Err() == nil && !errors.Is(err, audiodec.ErrUnsupported) {
+			reportMediaFailure(id, path, codec, at, err)
+		}
+	}
+	dec, err := audiodec.OpenWith(reader, audiodec.Options{Report: func(i audiodec.Issue) { reportMediaIssue(id, path, i) }})
 	if err != nil {
-		return err
+		undecodable(b.queue.entry(id).Codec, 0, err)
+		return nil, err
 	}
 	if at > 0 {
 		// Report where the seek really landed, which for MP3 is an estimate.
+		target := at
 		if at, err = dec.Seek(at); err != nil {
-			return err
+			undecodable(dec.Format().Codec, target, err)
+			return nil, err
 		}
 	}
+	// After any seek, so that it starts where decoding does.
+	source.startReadAhead(b.readAhead)
 	f := dec.Format()
-	metricStartup.Observe(time.Since(startedAt).Seconds())
+	if metricsEnabled {
+		metricStartup.WithLabelValues(audio(stageInput, "slopify")...).Observe(time.Since(startedAt).Seconds())
+	}
 	slog.Info("native decoding", "entry", id, "rate", f.Rate, "channels", f.Channels, "bits", f.Bits, "at", at)
 	begin := format{rate: f.Rate, channels: f.Channels, bits: f.Bits}
 	if !send(nativeChunk{entry: id, begin: &begin, codec: f.Codec, lossy: f.Lossy, start: at}) {
-		return ctx.Err()
+		return nil, ctx.Err()
 	}
+	var decoded int64
 	for {
 		buffer := nativeBuffers.Get().(*[]int32)
-		n, err := dec.Read(*buffer)
-		if n > 0 && !send(nativeChunk{entry: id, samples: (*buffer)[:n]}) {
-			return ctx.Err()
+		n, err := readNativeChunk(dec, *buffer)
+		decoded += int64(n)
+		if n > 0 {
+			input := sourceInput{Bytes: reader.bytesRead, Frames: uint64(decoded) / uint64(f.Channels), Rate: f.Rate}
+			if measured, ok := dec.(audiodec.EncodedInput); ok {
+				input.Bytes, input.Frames = measured.InputTotals()
+			}
+			if !send(nativeChunk{entry: id, samples: (*buffer)[:n], input: &input}) {
+				return nil, ctx.Err()
+			}
 		}
 		if n == 0 {
 			nativeBuffers.Put(buffer)
 		}
 		if errors.Is(err, io.EOF) {
 			if !send(nativeChunk{entry: id, end: true}) {
-				return ctx.Err()
+				return nil, ctx.Err()
 			}
-			return nil
+			return nil, nil
 		}
 		if err != nil {
-			return err
+			undecodable(f.Codec, at+float64(decoded/int64(f.Channels))/float64(f.Rate), err)
+			return nil, err
 		}
 	}
 }
 
+// Decoders may return one codec frame per Read (MP3: usually 1152 frames).
+// Fill the PCM block so queue slots represent the advertised sample capacity,
+// rather than a codec-dependent number of short reads. Never cross track EOF.
+func readNativeChunk(dec interface{ Read([]int32) (int, error) }, dst []int32) (int, error) {
+	n := 0
+	for n < len(dst) {
+		read, err := dec.Read(dst[n:])
+		n += read
+		if err != nil || read == 0 {
+			return n, err
+		}
+	}
+	return n, nil
+}
+
 // nativeMark is a change at a frame written to the device, applied once heard so
-// that the controller never sees a track before it is audible: a track's end, or
-// the start of the next one.
+// that the controller never sees a track before it is audible: a track's end, the
+// start of the next one, or a stretch of stall sound that is not part of a track.
 type nativeMark struct {
 	frame uint64
 	ended uint64 // entry that finished, or zero
 	next  uint64 // entry that starts, or zero
 	start float64
+	gap   uint64 // frames of stall sound, which the position does not count
 }
 
-func (b *nativeBackend) output(ctx context.Context, s *session, chunks <-chan nativeChunk) {
+const (
+	// nativeStallLow is how little audio the device may hold, in milliseconds,
+	// with nothing decoded, before stall sound is written to cover the gap.
+	nativeStallLow = 100
+	// nativeStallChunk is how much stall sound is written at a time, in milliseconds.
+	nativeStallChunk = 50
+)
+
+func (b *nativeBackend) output(ctx context.Context, s *session, chunks <-chan nativeChunk, seekCue, announce bool) {
+	var pending []nativeChunk
+	if announce {
+		pending = waitStartupAudio(ctx, chunks, b.StartSound, time.Second)
+	}
 	var out nativeOutput
 	var current format
 	var written, trackStart uint64
 	var start float64
 	var marks []nativeMark
+	starved := false
+	running := false
+	musicFrames := 0  // Do not treat startup buffering as a mid-track underrun.
+	var stall []int32 // one loop period, for current
+	var stallAt int   // next frame of it to play
 	defer func() {
+		if slopifyRateOwner.CompareAndSwap(s, nil) { // Not if a newer session set it.
+			if metricsEnabled {
+				metricRate.DeleteLabelValues(audio(stageInput, "slopify")...)
+			}
+		}
 		if out != nil {
 			out.Close()
+		}
+		if b.sender != nil {
+			b.sender.Flush() // Whatever stopped this session stops the copy too.
 		}
 	}()
 	peaks := nativePeaks{report: b.peak}
 	playing := s.first
 	fail := func(err error) {
 		s.failed.Store(true)
-		b.decodedState(format{}, "error")
+		b.decodedState("error")
 		slog.Warn("native playback failed", "entry", playing, "err", err)
 	}
 	// report advances the heard position and announces finished tracks.
@@ -288,15 +470,123 @@ func (b *nativeBackend) output(ctx context.Context, s *session, chunks <-chan na
 		}
 		return true
 	}
-	for c := range chunks {
+	// A seek is heard at once, in the last format, rather than after the original opens.
+	if seekCue {
+		b.mu.Lock()
+		f := b.last
+		b.mu.Unlock()
+		if f.rate == 0 || f.channels == 0 {
+			f = format{rate: 48000, channels: 2, bits: 16}
+		}
+		if opened, err := b.open(f); err != nil {
+			slog.Warn("seek sound unavailable", "err", err)
+		} else if err = opened.Write(seekSound(f.rate, f.channels)); err != nil {
+			opened.Close()
+			slog.Warn("seek sound unavailable", "err", err)
+		} else {
+			out, current = opened, f
+			written = uint64(len(seekSound(f.rate, f.channels)) / f.channels)
+		}
+	}
+	// fillStall covers a decoder or network stall with the looping stall sound, so
+	// the device neither runs dry nor goes quiet. It is local: not on RTP, not in
+	// the peaks that drive source arbitration, and not counted in the position.
+	fillStall := func() error {
+		if len(stall) == 0 {
+			stall = stallSound(current.rate, current.channels)
+			stallAt = 0
+		}
+		frames := len(stall) / current.channels
+		n := min(current.rate*nativeStallChunk/1000, frames-stallAt)
+		if err := out.Write(stall[stallAt*current.channels : (stallAt+n)*current.channels]); err != nil {
+			return err
+		}
+		stallAt = (stallAt + n) % frames
+		if last := len(marks) - 1; last >= 0 && marks[last].gap != 0 && marks[last].frame+marks[last].gap == written {
+			marks[last].gap += uint64(n)
+		} else {
+			marks = append(marks, nativeMark{frame: written, gap: uint64(n)})
+		}
+		written += uint64(n)
+		return nil
+	}
+	// receive waits for the next chunk, filling the device while it waits once
+	// playback is under way.
+	var stallTimer *time.Timer
+	defer func() {
+		if stallTimer != nil {
+			stallTimer.Stop()
+		}
+	}()
+	receive := func() (nativeChunk, bool, error) {
 		if ctx.Err() != nil {
+			return nativeChunk{}, false, nil
+		}
+		if len(pending) > 0 {
+			c := pending[0]
+			pending = pending[1:]
+			return c, true, nil
+		}
+		select {
+		case c, ok := <-chunks:
+			return c, ok, nil
+		default:
+		}
+		if !running || out == nil || current.rate == 0 || musicFrames < current.rate || !nativeBuffered(out) || !b.cuesAllowed() {
+			select {
+			case c, ok := <-chunks:
+				return c, ok, nil
+			case <-ctx.Done():
+				return nativeChunk{}, false, nil
+			}
+		}
+		low := current.rate * nativeStallLow / 1000
+		for {
+			if ctx.Err() != nil {
+				return nativeChunk{}, false, nil
+			}
+			delay := out.Delay()
+			if delay <= low {
+				if err := fillStall(); err != nil {
+					return nativeChunk{}, false, err
+				}
+				if !report() {
+					return nativeChunk{}, false, nil
+				}
+				delay = out.Delay()
+			}
+			wait := time.Duration(max(delay-low, current.rate/100)) * time.Second / time.Duration(current.rate)
+			if stallTimer == nil {
+				stallTimer = time.NewTimer(wait)
+			} else {
+				stallTimer.Reset(wait)
+			}
+			select {
+			case c, ok := <-chunks:
+				stallTimer.Stop()
+				return c, ok, nil
+			case <-stallTimer.C:
+			case <-ctx.Done():
+				return nativeChunk{}, false, nil
+			}
+		}
+	}
+	for {
+		c, ok, err := receive()
+		if err != nil {
+			errorAt(stageOutput, "slopify", "write")
+			fail(err)
 			return
+		}
+		if !ok || ctx.Err() != nil {
+			break
 		}
 		switch {
 		case c.failure != nil:
 			fail(c.failure)
 			return
 		case c.begin != nil:
+			musicFrames = 0
 			if out == nil || *c.begin != current {
 				if out != nil { // Reopen only for a format change, after playing out.
 					if err := out.Drain(); err != nil {
@@ -320,9 +610,24 @@ func (b *nativeBackend) output(ctx context.Context, s *session, chunks <-chan na
 				}
 				slog.Info("native output opened", "rate", c.begin.rate, "channels", c.begin.channels, "bits", c.begin.bits)
 				out, current = opened, *c.begin
-				b.decodedState(current, "running")
+				stall = nil
+				b.decodedState("running")
+			} else if !running { // Already open in this format for the seek cue.
+				b.decodedState("running")
 			}
+			running = true
+			b.mu.Lock()
+			b.last = current
+			b.mu.Unlock()
 			playing = c.entry
+			slopifyRateOwner.Store(s)
+			if metricsEnabled {
+				metricRate.WithLabelValues(audio(stageInput, "slopify")...).Set(float64(c.begin.rate))
+			}
+			if b.sender != nil {
+				e := b.queue.entry(c.entry)
+				b.sender.Begin(rtp.Format{Rate: c.begin.rate, Channels: c.begin.channels, Bits: c.begin.bits}, rtp.Track{Title: e.Title, Artist: e.Artist, Album: e.Album})
+			}
 			b.samplesPerSec.Store(int64(c.begin.rate * c.begin.channels))
 			if b.formats != nil {
 				b.formats(c.entry, nativeInputPCM(*c.begin, c.codec, c.lossy), out.Format())
@@ -331,16 +636,36 @@ func (b *nativeBackend) output(ctx context.Context, s *session, chunks <-chan na
 		case c.end:
 			marks = append(marks, nativeMark{frame: written, ended: c.entry})
 		default:
-			metricDecodeQueue.Observe(float64(len(chunks)))
+			// An empty queue mid-playback means decoding or the network fell behind.
+			if queued, _ := b.queueFill(); len(chunks) == 0 && !starved {
+				starved = true
+				if metricsEnabled {
+					metricUnderruns.WithLabelValues(audio(stageInput, "slopify")...).Inc()
+				}
+			} else if len(chunks) > 0 {
+				starved = false
+				if metricsEnabled {
+					metricBuffer.WithLabelValues(audio(stageInput, "slopify")...).Observe(float64(queued) / 1000)
+				}
+			}
 			b.queuedSamples.Add(-int64(len(c.samples)))
+			if b.sender != nil {
+				b.sender.Write(c.samples)
+			}
 			writeAt := time.Now()
 			if err := out.Write(c.samples); err != nil {
-				metricOutputErrors.WithLabelValues("slopify").Inc()
+				errorAt(stageOutput, "slopify", "write")
 				fail(err)
 				return
 			}
-			metricWriteTime.WithLabelValues("slopify").Observe(millis(time.Since(writeAt)))
-			metricDeviceDelay.WithLabelValues("slopify").Observe(float64(out.Delay()) * 1000 / float64(current.rate))
+			if metricsEnabled {
+				metricWriteTime.WithLabelValues(audio(stageOutput, "slopify")...).Observe(time.Since(writeAt).Seconds())
+				metricBuffer.WithLabelValues(audio(stageOutput, "slopify")...).Observe(float64(out.Delay()) / float64(current.rate))
+			}
+			musicFrames = min(current.rate, musicFrames+len(c.samples)/current.channels)
+			if c.input != nil && b.inputStats != nil {
+				b.inputStats(*c.input)
+			}
 			written += uint64(len(c.samples) / current.channels)
 			peaks.add(c.samples, current, time.Duration(out.Delay())*time.Second/time.Duration(current.rate), time.Now())
 			buffer := c.samples[:cap(c.samples)]
@@ -364,12 +689,21 @@ func (b *nativeBackend) output(ctx context.Context, s *session, chunks <-chan na
 	}
 }
 
+// nativeBuffered reports whether out is a device with a buffer that can run dry,
+// rather than one that only paces or discards, which stall sound cannot help.
+func nativeBuffered(out nativeOutput) bool {
+	sized, ok := out.(interface{ BufferFrames() int })
+	return ok && sized.BufferFrames() > 0
+}
+
 func (b *nativeBackend) applyMark(ctx context.Context, s *session, m nativeMark, trackStart *uint64, start *float64) bool {
 	if m.next != 0 {
 		s.cur.Store(m.next)
 		*trackStart, *start = m.frame, m.start
 		s.pos.Store(math.Float64bits(m.start))
 	}
+	// The track resumes after the stall sound; until then its position holds.
+	*trackStart += m.gap
 	if m.ended != 0 {
 		select {
 		case b.events <- event{ended: true, entry: m.ended, session: s}:
@@ -384,7 +718,7 @@ func (b *nativeBackend) applyMark(ctx context.Context, s *session, m nativeMark,
 // are stamped on the audio's own timeline, evenly, and released once heard, so a
 // continuous stream charts continuously however bursty the writes are.
 type nativePeaks struct {
-	report  func(float64, time.Time)
+	report  func(uint32, time.Time)
 	peak    uint32
 	frames  int
 	next    time.Time
@@ -392,7 +726,7 @@ type nativePeaks struct {
 }
 
 type nativePeak struct {
-	peak float64
+	peak uint32
 	at   time.Time
 }
 
@@ -413,10 +747,11 @@ func (p *nativePeaks) add(samples []int32, f format, delay time.Duration, now ti
 	windowTime := time.Duration(window) * time.Second / time.Duration(f.rate)
 	total := len(samples) / f.channels
 	for i, v := range samples {
+		magnitude := uint32(v)
 		if v < 0 {
-			v = ^v
+			magnitude = -magnitude // Includes MinInt32 without signed overflow.
 		}
-		p.peak = max(p.peak, uint32(v))
+		p.peak = max(p.peak, magnitude)
 		if (i+1)%f.channels != 0 {
 			continue
 		}
@@ -430,7 +765,7 @@ func (p *nativePeaks) add(samples []int32, f format, delay time.Duration, now ti
 			at = heard
 		}
 		p.next = at.Add(windowTime)
-		p.pending = append(p.pending, nativePeak{peak: float64(p.peak) / (1 << 31), at: at})
+		p.pending = append(p.pending, nativePeak{peak: p.peak, at: at})
 		p.peak, p.frames = 0, 0
 	}
 	p.release(now)
@@ -466,23 +801,24 @@ func (n *nullOutput) Format() localPCM {
 	return localPCM{Format: "S32_LE", Rate: n.f.rate, Channels: n.f.channels}
 }
 
-// alsaOutput packs S32 samples for the device without losing precision: it only
-// narrows words whose low bits are known to be unused by the source.
+// alsaOutput packs S32 samples for the device. Precision is preserved unless
+// the user explicitly permits the 16-bit fallback with -allow-truncate.
 type alsaOutput struct {
 	pcm       *alsa.PCM
+	id        string // source slot writing, for metrics; empty is Slopify
 	format    int
 	source    int
 	duplicate bool
 	scratch   []byte
 }
 
-func nativeFormats(bits int) []int {
+func nativeFormats(bits int, allowTruncate bool) []int {
 	// S32 first: it carries everything, including decoded MP3 precision.
 	formats := []int{alsa.FormatS32LE}
 	if bits <= 24 {
 		formats = append(formats, alsa.FormatS24LE, alsa.FormatS243LE)
 	}
-	if bits <= 16 {
+	if bits <= 16 || allowTruncate {
 		formats = append(formats, alsa.FormatS16LE)
 	}
 	return formats
@@ -491,9 +827,12 @@ func nativeFormats(bits int) []int {
 // liveDeviceBufferMS is the -live-device-buffer-ms flag; 0 means OpenLowLatency.
 var liveDeviceBufferMS int
 
+// allowOutputTruncate is opt-in and only adds a final S16 fallback.
+var allowOutputTruncate bool
+
 func openALSAOutput(device string, f format, live bool) (nativeOutput, error) {
 	var errs []error
-	for _, candidate := range nativeFormats(f.bits) {
+	for _, candidate := range nativeFormats(f.bits, allowOutputTruncate) {
 		for _, channels := range []int{f.channels, 2} {
 			if channels != f.channels && (f.channels != 1 || channels != 2) {
 				continue
@@ -514,10 +853,17 @@ func openALSAOutput(device string, f format, live bool) (nativeOutput, error) {
 				errs = append(errs, err)
 				continue
 			}
+			if candidate == alsa.FormatS16LE && f.bits > 16 {
+				slog.Warn("truncating audio output", "inputBits", f.bits, "outputBits", 16, "rate", f.rate)
+			}
 			return &alsaOutput{pcm: pcm, format: candidate, duplicate: channels != f.channels}, nil
 		}
 	}
-	return nil, fmt.Errorf("no lossless device format for %d Hz, %d bits, %d channels: %w", f.rate, f.bits, f.channels, errors.Join(errs...))
+	policy := "lossless"
+	if allowOutputTruncate {
+		policy = "compatible"
+	}
+	return nil, fmt.Errorf("no %s device format for %d Hz, %d bits, %d channels: %w", policy, f.rate, f.bits, f.channels, errors.Join(errs...))
 }
 
 func (a *alsaOutput) Write(samples []int32) error {
@@ -532,8 +878,10 @@ func (a *alsaOutput) Write(samples []int32) error {
 	a.scratch = data
 	underruns, err := a.pcm.WriteFrames(data)
 	if underruns > 0 {
-		metricDeviceUnderruns.Add(float64(underruns))
-		slog.Warn("audio underrun", "count", underruns)
+		if metricsEnabled {
+			metricUnderruns.WithLabelValues(audio(stageOutput, a.id)...).Add(float64(underruns))
+		}
+		slog.Warn("audio underrun", "source", a.id, "count", underruns)
 	}
 	return err
 }

@@ -1,15 +1,17 @@
 import { MediaEngine, isVideo, currentEntry as current } from "./media.js";
 import { fetchRetry, probeStream } from "./network.js";
 
-// One durable queue per signed-in user. Tabs are outputs, alongside devices;
-// opening another tab observes the queue without moving playback.
+// One durable queue per signed-in user. Each browser is one output, alongside
+// devices: its tabs share the output ID and the most recently opened tab plays
+// it, while older tabs remain controllers that can take it back ("Use here").
 
 const $ = (id) => document.getElementById(id);
 let audio = $("audio");
 function onMedia(type, listener) { engine.on(type, listener); }
 const engine = new MediaEngine({
   audio, video: $("video"),
-  playback: () => player(me),
+  // Only the tab playing this browser's output follows its desired state.
+  playback: () => tab.active ? player(me) : null,
   audioProfile: () => quality(),
   streamURL, probeStream,
   metadata: (entry) => state.trackDetails.get(entry.path),
@@ -30,8 +32,15 @@ const engine = new MediaEngine({
       navigator.mediaSession.metadata = new MediaMetadata({title: entry.title, artist: entry.artist || "", album: entry.album || ""});
     }
   },
-  onBlocked: () => { $("blocked").hidden = false; report({blocked: true}); },
-  onPlaying: () => { $("blocked").hidden = true; },
+  onBlocked: () => {
+    // A tab taking over from one still playing hands back instead of pausing.
+    if (tab.handover) { tab.handover = false; tabChannel?.postMessage({type: "blocked"}); return yieldTab(); }
+    $("blocked").hidden = false; report({blocked: true});
+  },
+  onPlaying: () => {
+    $("blocked").hidden = true;
+    if (tab.handover) { tab.handover = false; tabChannel?.postMessage({type: "playing"}); }
+  },
   onError: (error) => toast(error.message),
   onEvent: () => renderNerd(),
 });
@@ -53,15 +62,79 @@ for (const button of document.querySelectorAll("[data-theme-choice]")) {
   });
 }
 
+// Tabs of one browser share its output when Web Locks can make one of them the
+// player; without them each tab stays a separate output, as two tabs playing the
+// same output would both make sound.
+const tabsShareOutput = "locks" in navigator;
 const me = (() => {
-  let id = sessionStorage.getItem("slopify-output");
-  if (!id) {
+  const store = tabsShareOutput ? localStorage : sessionStorage;
+  let id = store.getItem("slopify-output") || sessionStorage.getItem("slopify-output");
+  if (!/^web-[a-z0-9]{8,40}$/.test(id || "")) {
     const bytes = crypto.getRandomValues(new Uint8Array(12));
     id = "web-" + [...bytes].map((b) => (b % 36).toString(36)).join("");
-    sessionStorage.setItem("slopify-output", id);
   }
+  store.setItem("slopify-output", id);
   return id;
 })();
+
+// tab tracks whether this tab plays the browser's output. Only the lock holder
+// registers the output, plays audio and reports; the newest tab steals the lock.
+const tab = {active: !tabsShareOutput, handover: false, release: null, events: null};
+const tabChannel = tabsShareOutput && "BroadcastChannel" in self ? new BroadcastChannel(`slopify-tab-${me}`) : null;
+// claimTab makes this tab play the browser's output; true if it was not already.
+async function claimTab() {
+  if (!tabsShareOutput || tab.active) return false;
+  const held = (await navigator.locks.query()).held.some((lock) => lock.name === `slopify-output-${me}`);
+  await new Promise((granted) => {
+    navigator.locks.request(`slopify-output-${me}`, {steal: true}, () => {
+      tab.active = true;
+      // A tab still playing keeps going until this one makes sound or gives up.
+      tab.handover = held;
+      if (held) setTimeout(() => { tab.handover = false; }, 8000);
+      granted();
+      tabChanged();
+      return new Promise((release) => { tab.release = release; });
+    }).catch((error) => { if (error.name === "AbortError") tabLost(); });
+  });
+  return true;
+}
+// untilConnected waits briefly for a freshly claimed output to come online.
+async function untilConnected(ms) {
+  for (const end = performance.now() + ms; performance.now() < end; ) {
+    if (state.playersReady && player(me)?.connected) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+// tabLost runs when a newer tab steals the lock. Audio continues until the new
+// tab confirms it is playing, so that opening a tab never causes silence.
+function tabLost() {
+  if (!tab.active) return;
+  tab.active = false;
+  tab.release = null;
+  const wasPlaying = !audio.paused;
+  tabChanged();
+  if (!wasPlaying) return engine.pause();
+  const stop = () => { clearTimeout(timer); tabChannel?.removeEventListener("message", onMessage); if (!tab.active) engine.pause(); };
+  const onMessage = (ev) => {
+    if (ev.data?.type === "playing") stop();
+    else if (ev.data?.type === "blocked") { clearTimeout(timer); tabChannel?.removeEventListener("message", onMessage); claimTab(); }
+  };
+  const timer = setTimeout(stop, 8000);
+  tabChannel?.addEventListener("message", onMessage);
+}
+// yieldTab gives the output back to the tab that was playing.
+function yieldTab() {
+  if (!tab.active) return;
+  tab.active = false;
+  tab.release?.();
+  tab.release = null;
+  engine.pause();
+  tabChanged();
+}
+function tabChanged() {
+  $("inactive-tab").hidden = tab.active || !tabsShareOutput;
+  tab.events?.abort(); // reconnect as the output, or as a controller only
+}
 
 const state = {
   players: new Map(), // id -> {p, at}: player and when it arrived
@@ -114,14 +187,16 @@ async function signIn() {
   throw new Error("signed out");
 }
 
+let anonymous = false;
 let accessToken = "", accessExpires = 0, tokenRequest = null;
 async function getAccessToken(force = false) {
-  if (!force && accessToken && Date.now() + 30000 < accessExpires) return accessToken;
+  if (!force && (anonymous || accessToken) && Date.now() + 30000 < accessExpires) return accessToken;
   if (!tokenRequest) tokenRequest = (async () => {
-    const res = await fetchRetry("/auth/token", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}", cache: "no-store" }, {retry: true});
+    const res = await fetchRetry("/auth/token", { method: "POST", headers: { "Content-Type": "application/json", "X-Slopify-Request": "1" }, body: "{}", cache: "no-store" }, {retry: true});
     if (res.status === 401) return signIn();
     if (!res.ok) throw new Error("Cannot renew login");
     const token = await res.json();
+    anonymous = token.anonymous === true;
     accessToken = token.accessToken;
     accessExpires = Date.parse(token.expiresAt);
     return accessToken;
@@ -130,7 +205,7 @@ async function getAccessToken(force = false) {
 }
 async function authorizedFetch(path, options = {}) {
   let token = await getAccessToken();
-  const request = () => fetchRetry(`/api/${path}`, { ...options, headers: { ...options.headers, Authorization: `Bearer ${token}` } });
+  const request = () => fetchRetry(`/api/${path}`, { ...options, headers: { ...options.headers, "X-Slopify-Request": "1", ...(token ? {Authorization: `Bearer ${token}`} : {}) } });
   let res = await request();
   if (res.status === 401) { token = await getAccessToken(true); res = await request(); }
   if (res.status === 401) return signIn();
@@ -147,22 +222,34 @@ async function post(path, body) {
 }
 
 async function playbackCommand(op, extra = {}, target = null) {
-  // Opening a tab does not move playback. Explicit Play may join alongside
-  // offline tabs, but persistent web sinks are never treated as abandoned.
   const queue = player();
   const startsPlayback = op === "play" || op === "replace" ||
     (op === "toggle" && queue?.state !== "playing") || extra.play;
+  const endpoint = target === null || target === me ? "me" : target;
+  // Starting playback from a tab makes it the one that plays this browser.
+  if (endpoint === "me" && startsPlayback && await claimTab()) await untilConnected(3000);
+  // Explicit Play may join alongside offline browsers, but persistent web sinks
+  // are never treated as abandoned.
   const abandonedBrowsers = state.outputIds.length > 0 && state.outputIds.every((id) => {
     const output = player(id);
-    return output?.kind === "browser" && !output.connected;
+    return output?.kind === "browser" && !output.connected && !output.available;
   });
-  if ((target === null || target === me) && startsPlayback && abandonedBrowsers) {
+  if (endpoint === "me" && startsPlayback && abandonedBrowsers) {
     if (!state.playersReady || !player(me)?.connected) throw new Error("This browser is reconnecting. Try Play again once connected.");
     await post("players/me/command", { op: "outputs", outputs: [...new Set([...state.outputIds, me])] });
     toast("Playing in this browser; the previous browser is offline.");
   }
-  const endpoint = target === null || target === me ? "me" : target;
-  return post(`players/${endpoint}/command`, { op, ...extra });
+  if (endpoint === "me" && startsPlayback) {
+    // The server releases lapsed outputs before starting; say so when it will.
+    const others = state.outputIds.filter((id) => id !== me);
+    const lapsed = others.filter((id) => releaseIn(id) === 0);
+    if (lapsed.length) {
+      const names = lapsed.map((id) => player(id)?.name || "an output").join(", ");
+      toast(lapsed.length === others.length ? `Playing in this browser: ${names} released after the pause.` : `${names} released after the pause.`);
+    }
+  }
+  // From lets the server select this browser when every other pin has lapsed.
+  return post(`players/${endpoint}/command`, endpoint === "me" ? { op, ...extra, from: me } : { op, ...extra });
 }
 
 function cmd(op, extra = {}, target = null) {
@@ -202,7 +289,7 @@ function put(p) {
     state.selected = p.outputId || "";
     state.outputIds = outputIntent || p.outputIds || (p.outputId ? [p.outputId] : []);
   }
-  if (p.id === me) reconcile(p);
+  if (p.id === me && tab.active) reconcile(p);
 }
 
 function receivePlayers(type, data) {
@@ -220,7 +307,9 @@ async function connect() {
   let backoff = 1000;
   for (;;) {
     try {
-      const res = await authorizedFetch(`players/events?player=${me}&name=${encodeURIComponent(browserName())}`);
+      tab.events = new AbortController();
+      const as = tab.active ? `?player=${me}&name=${encodeURIComponent(browserName())}${installed() ? "&background=1" : ""}` : "";
+      const res = await authorizedFetch(`players/events${as}`, {signal: tab.events.signal});
       if (!res.ok || !res.body) throw new Error("Event stream unavailable");
       backoff = 1000;
       const reader = res.body.getReader(), decoder = new TextDecoder();
@@ -240,11 +329,14 @@ async function connect() {
           }
         }
       } finally { await reader.cancel().catch(() => {}); }
-    } catch (error) { console.debug("Playback events reconnecting:", error.message); }
+    } catch (error) {
+      if (tab.events?.signal.aborted) { backoff = 0; continue; } // this tab changed role
+      console.debug("Playback events reconnecting:", error.message);
+    }
     state.playersReady = false;
     render();
     await new Promise((resolve) => setTimeout(resolve, backoff));
-    backoff = Math.min(backoff * 2, 10000);
+    backoff = Math.min(Math.max(backoff, 500) * 2, 10000);
   }
 }
 
@@ -264,12 +356,24 @@ async function streamURL(entry, profile, start) {
   return (await api("stream?" + query)).url;
 }
 
+// An installed app (home-screen PWA) keeps playing while hidden even when its
+// event stream drops, so the server keeps it selected for a bounded time.
+const installed = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+
 function report(extra = {}) {
   const p = player(me);
-  if (!p || !engine.loaded || (engine.recovering && !extra.blocked)) return;
-  post(`players/${me}/report`, {
-    version: p.version, entry: engine.loaded.id, position: enginePos(),
-    state: audio.paused ? "paused" : "playing", ...extra,
+  if (!tab.active || !p || !engine.loaded || (engine.recovering && !extra.blocked)) return;
+  authorizedFetch(`players/${me}/report`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ version: p.version, entry: engine.loaded.id, position: enginePos(),
+      state: audio.paused ? "paused" : "playing", ...extra }),
+  }).then(async (res) => {
+    // The reply is this output's state: with the event stream down, as in a
+    // backgrounded app, it is how the next track arrives after "ended".
+    if (!res.ok) return;
+    const next = await res.json();
+    const known = player(me);
+    if (next?.id === me && (!known || next.version >= known.version)) { put(next); render(); }
   }).catch(() => {});
 }
 
@@ -332,6 +436,10 @@ function render() {
   document.title = e && p.state === "playing" ? `${e.title} · Slopify` : "Slopify";
   $("hero-title").textContent = e?.title || "Nothing playing";
   $("hero-artist").textContent = e ? [e.artist, e.album].filter(Boolean).join(" · ") : "Find something you love in your library.";
+  const pause = $("pause-source");
+  pause.hidden = p.state !== "paused";
+  pause.textContent = p.pause ? `Paused by ${p.pause.name}.` : "Paused";
+  pause.title = p.pause ? `${p.pause.source} · ${new Date(p.pause.at).toLocaleString()}` : "";
   renderVideo();
   renderPlaylist(p);
   tick();
@@ -478,6 +586,34 @@ function outputVolume(p) {
     }});
   return el("label", {class: "output-volume"}, el("span", {}, "Volume"), input, label);
 }
+// Selected outputs lapse once playback has been stopped this long, so that a
+// later Play cannot start a speaker where people are asleep. 0 keeps it always.
+const defaultKeepMinutes = 30;
+const keepChoices = [[30, "30 min"], [120, "2 hours"], [480, "8 hours"], [0, "Always"]];
+const keepMinutes = (id) => player()?.outputKeep?.[id] ?? defaultKeepMinutes;
+// releaseIn is the time left before output id lapses, or null when it will not.
+function releaseIn(id) {
+  const q = player(), minutes = keepMinutes(id);
+  if (!q || q.state === "playing" || !minutes || !state.outputIds.includes(id)) return null;
+  const since = q.idleSince ? Date.parse(q.idleSince) : Date.now();
+  return Math.max(0, since + minutes * 60000 - Date.now());
+}
+function keepSelect(p) {
+  if (!p.adopted || p.kind === "unknown") return null;
+  const select = el("select", {ariaLabel: `Keep ${p.id === me ? "this browser" : p.name} selected after playback stops`,
+    onchange: async (ev) => {
+      try { await post("players/me/command", {op: "keep", to: p.id, minutes: Number(ev.target.value)}); }
+      catch (error) { toast(error.message); renderDevices(visibleOutputs()); }
+    }}, ...keepChoices.map(([value, label]) => el("option", {value}, label)));
+  return el("label", {class: "output-keep"}, el("span", {}, "Keep selected when stopped"), select);
+}
+function selectedStatus(id) {
+  const left = releaseIn(id);
+  if (left === null) return "Selected";
+  const minutes = Math.ceil(left / 60000);
+  return minutes > 90 ? `Selected · released in ${Math.round(minutes / 60)} h` : `Selected · released in ${minutes} min`;
+}
+
 function renderDevices(outputs) {
   if (state.drag?.output) return;
   const container = $("devices");
@@ -487,7 +623,7 @@ function renderDevices(outputs) {
   outputs.forEach((p, index) => {
     const checked = state.outputIds.includes(p.id);
     // Playback position reports must not replace controls or steal focus.
-    const signature = JSON.stringify([p.name, p.reportedName, p.nameSet, p.kind, p.adopted, p.volume?.name, p.volume?.min, p.volume?.max, p.volume?.steps]);
+    const signature = JSON.stringify([p.name, p.kind, p.adopted, p.volume?.name, p.volume?.min, p.volume?.max, p.volume?.steps]);
     let row = deviceCards.get(p.id);
     if (!row || row.signature !== signature) {
       const toggle = el("button", {type: "button", class: "device-choice",
@@ -496,11 +632,8 @@ function renderDevices(outputs) {
         el("span", {class: "device-info"}, el("strong", {}, p.id === me ? "This browser" : p.name), el("span")));
       const card = el("div", {class: "device-card"}, toggle,
         !p.adopted ? el("button", {onclick: () => cmd("adopt", {}, p.id)}, "Pair with my account") : null,
-        p.kind==="device" && p.adopted ? el("div", {class:"shared-output-actions"},
-          el("button", {onclick:async()=>{const name=prompt("Web display name (leave empty for the owner + player name)",p.nameSet?p.name:"");if(name===null)return;try{await cmd("rename",{name},p.id);}catch(error){toast(error.message);}}}, "Rename"),
-          p.nameSet ? el("button", {onclick:()=>cmd("rename",{name:""},p.id)},"Use default name") : null,
-          el("small", {}, `Player reports: ${p.reportedName||p.name}`)) : null,
         outputVolume(p),
+        keepSelect(p),
         p.kind === "web-sink" ? el("div", {class: "shared-output-actions"},
           el("button", {title: "Create a new link and invalidate the previous one", onclick: () => newOutputLink(p.id)}, "New link"),
           el("button", {onclick: async () => {
@@ -526,7 +659,12 @@ function renderDevices(outputs) {
     toggle.setAttribute("aria-pressed", String(checked));
     toggle.setAttribute("aria-label", `${checked ? "Deselect" : "Select"} ${p.id === me ? "this browser" : p.name}`);
     toggle.querySelector(".output-icon").textContent = checked ? "◉" : "○";
-    toggle.querySelector(".device-info span").textContent = p.kind === "web-sink" ? `Web sink · ${sessionCount(p.receivers)}` : !p.connected ? checked ? "Offline · selected" : "Offline" : checked ? "Selected" : "Available";
+    toggle.querySelector(".device-info span").textContent = p.kind === "web-sink" ? `Web sink · ${sessionCount(p.receivers)}${checked ? " · " + selectedStatus(p.id) : ""}` :
+      !p.available ? checked ? "Offline · selected" : "Offline" :
+      p.background && !p.connected ? checked ? `In background · ${selectedStatus(p.id)}` : "In background" : checked ? selectedStatus(p.id) : "Available";
+    if (p.volume?.muted) toggle.querySelector(".device-info span").textContent += " · Muted";
+    const keep = card.querySelector(".output-keep select");
+    if (keep && !keep.matches(":focus")) keep.value = String(keepMinutes(p.id));
     const slider = card.querySelector(".output-volume input");
     if (slider) {
       slider.disabled = !state.playersReady || !p.connected || !checked;
@@ -540,6 +678,9 @@ function renderDevices(outputs) {
     if (container.children[index] !== card) container.insertBefore(card, container.children[index] || null);
   });
 }
+
+// Release countdowns change without any player event.
+setInterval(() => { if (!$("settings-panel").hidden) renderDevices(visibleOutputs()); }, 30000);
 
 function showOutputLink(value) {
   $("output-link-url").value = new URL(value, location.origin).href;
@@ -1035,6 +1176,7 @@ function renderNerd() {
     ["Duration / position", `${fmtTime(e?.duration)} / ${fmtTime(pos(state.queueId))}`],
     ["Stream", local ? isVideo(e) ? videoFormat(e) === "original" ? "Original · HTTP range seeking" : videoFormat(e) === "video-copy" ? "Original codecs · MP4 remux" : "Video copy + AAC · restart on seek (keyframe aligned)" : quality() === "original" ? "Original · HTTP range seeking" : `${quality()} · server transcoding` : "Original · decoded on device"],
     ["Last state update", rec ? `${((performance.now() - rec.at) / 1000).toFixed(1)} s ago` : "—"],
+    ...creditRows(details?.credits),
   ];
   if (local) {
     const ready = ["No data", "Metadata", "Current frame", "Future data", "Enough data"];
@@ -1071,9 +1213,29 @@ window.addEventListener("slopify:network", (event) => {
 
 // ---------------------------------------------------------------- start
 
-api("me").then((u) => ($("user").textContent = u.name || u.email || u.sub)).catch((error) => toast(error.message));
+api("me").then((u) => {
+  document.querySelector(".user button").hidden = !!u.anonymous;
+  if (u.anonymous) document.getElementById("queue-identity").textContent = "Anonymous mode: everyone shares this library and queue.";
+  $("user").textContent = u.name || u.email || u.sub;
+  $("demo-music-credits").hidden = !u.demoMusic;
+}).catch((error) => toast(error.message));
 renderTree();
-connect();
+// "Use here" is a click, so it also lifts any autoplay block from a handover.
+$("use-here").addEventListener("click", () => {
+  engine.blocked = false;
+  claimTab().catch((error) => toast(error.message));
+});
+// The newest tab takes over; with Web Locks the playing tab is always known.
+claimTab().finally(connect);
+// Closing the playing tab tells the server at once; a reload reconnects within
+// its short grace. keepalive fetch, unlike sendBeacon, can carry the token.
+addEventListener("pagehide", (ev) => {
+  const p = player(me);
+  if (ev.persisted || !tab.active || !p || (!anonymous && !accessToken) || Date.now() + 5000 > accessExpires) return;
+  fetch(`/api/players/${me}/report`, {method: "POST", keepalive: true,
+    headers: {"Content-Type": "application/json", "X-Slopify-Request": "1", ...(accessToken ? {Authorization: `Bearer ${accessToken}`} : {})},
+    body: JSON.stringify({version: p.version, entry: p.current, gone: true})}).catch(() => {});
+});
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js");
 
 document.querySelectorAll("[data-playlist]").forEach((button) => button.addEventListener("click", async () => {
@@ -1093,6 +1255,41 @@ document.querySelectorAll("[data-playlist]").forEach((button) => button.addEvent
   } catch (err) { toast(err.message); }
   finally { button.disabled = false; }
 }));
+
+// Tag credits come from the indexer, which validates identifiers; links are
+// rebuilt here from validated values only and open outside the app.
+const mbid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+function externalLink(href, text) {
+  return el("a", { href, target: "_blank", rel: "noopener noreferrer" }, text);
+}
+function linkList(ids, url) {
+  const links = (ids || []).filter((id) => mbid.test(id)).map((id) => externalLink(url + id, id.slice(0, 8)));
+  if (!links.length) return null;
+  const span = el("span");
+  links.forEach((link, i) => span.append(...(i ? [", ", link] : [link])));
+  return span;
+}
+function creditRows(c) {
+  if (!c) return [];
+  const mb = "https://musicbrainz.org/";
+  let license = c.license;
+  try {
+    const url = new URL(c.license);
+    if (url.protocol === "https:" || url.protocol === "http:") license = externalLink(url.href, c.license);
+  } catch { /* plain text */ }
+  return [
+    ["Composer", c.composer], ["Copyright", c.copyright], ["License", license], ["Label", c.label],
+    ["ISRC", /^[A-Z]{2}[A-Z0-9]{3}[0-9]{7}$/.test(c.isrc || "") ? externalLink(mb + "isrc/" + c.isrc, c.isrc) : null],
+    ["MusicBrainz recording", linkList([c.mbRecording], mb + "recording/")],
+    ["MusicBrainz track", linkList([c.mbTrack], mb + "track/")],
+    ["MusicBrainz release", linkList([c.mbRelease], mb + "release/")],
+    ["MusicBrainz release group", linkList([c.mbReleaseGroup], mb + "release-group/")],
+    ["MusicBrainz work", linkList([c.mbWork], mb + "work/")],
+    ["MusicBrainz artist", linkList(c.mbArtists, mb + "artist/")],
+    ["MusicBrainz album artist", linkList(c.mbAlbumArtists, mb + "artist/")],
+    ["AcoustID", linkList([c.acoustid], "https://acoustid.org/track/")],
+  ].filter(([, value]) => value);
+}
 
 function codecTooltip(entry) {
   const details = state.trackDetails.get(entry.path);

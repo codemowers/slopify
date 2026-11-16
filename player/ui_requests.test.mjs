@@ -38,32 +38,10 @@ test('successful no-content command clears its deadline', async () => {
  assert.equal(cleared, true);
 });
 
-test('speaker tabs share SSE and keep it open until the last tab leaves', async () => {
- const worker = await readFile(new URL('./ui/events-worker.js', import.meta.url), 'utf8');
- const streams = [];
- class EventSource {
-  constructor() { streams.push(this); }
-  close() { this.closed = true; }
- }
- const context = vm.createContext({EventSource});
- vm.runInContext(worker, context);
- const ports = Array.from({length: 8}, () => ({messages: [], postMessage(message) { this.messages.push(message); }, start() {}, close() { this.closed=true; }}));
- for (const port of ports) { context.port=port;vm.runInContext('onconnect({ports:[port]})', context); }
- assert.equal(streams.length, 1);
- streams[0].onopen();
- streams[0].onmessage({data:'{"now":"test"}'});
- for (const port of ports) assert.equal(port.messages.at(-1).type, 'status');
- for (const port of ports.slice(0,-1)) port.onmessage({data:{type:'disconnect'}});
- assert.equal(streams[0].closed, undefined);
- ports.at(-1).onmessage({data:{type:'disconnect'}});
- assert.equal(streams[0].closed, true);
-});
-
-
 test('countdown and candidate connection clear when fallback is cancelled', () => {
  const nodes=new Map();
  const get=id=>{if(!nodes.has(id))nodes.set(id,{textContent:'',hidden:false,offsetWidth:800,setAttribute(){},querySelector(){return null;},getBoundingClientRect(){return {left:0,top:0,right:200,height:80};},replaceChildren(...paths){this.paths=paths;}});return nodes.get(id);};
- const context=vm.createContext({document:{getElementById:get,createElementNS(){return {attrs:{},setAttribute(k,v){this.attrs[k]=v;}};}},renderSourceStatuses(){},sourceBusy:false,sourceClock:1000,sourceColour:id=>id,
+ const context=vm.createContext({document:{getElementById:get,createElementNS(){return {attrs:{},setAttribute(k,v){this.attrs[k]=v;}};}},renderSourceStatuses(){},sourceBusy:false,sourceClock:1000,sourceColour:id=>id,queueLink:null,multicastSender:null,multicastReceivers:new Map(),
  sourceCards:new Map([['a',{root:get('card-a')}],['b',{root:get('card-b')}]]),
  sourceControl:{mode:'priority',selected:'a',sources:[{id:'a',name:'Current',connected:true,active:true},{id:'b',name:'Laptop',connected:true,active:false}],fallback:{sourceId:'b',at:new Date(6000).toISOString()}}});
  vm.runInContext(sources.slice(sources.indexOf('function renderRoutingProgress()'),sources.indexOf('new ResizeObserver(')),context);

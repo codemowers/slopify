@@ -3,10 +3,6 @@
 package audiometer
 
 import (
-	"encoding/binary"
-	"errors"
-	"io"
-	"math"
 	"sync"
 	"time"
 )
@@ -14,8 +10,10 @@ import (
 type Window struct {
 	Sequence uint64    `json:"sequence"`
 	At       time.Time `json:"at"`
-	Peak     float64   `json:"peak"`
-	DBFS     *float64  `json:"dbfs"`
+	// Keep the exact measured peak for source arbitration. Only the display
+	// envelope is quantized on the wire: -127..0 dBFS, -128 for silence.
+	Peak uint32 `json:"-"` // Absolute S32 PCM magnitude; full scale is 1<<31.
+	DB   int8   `json:"db"`
 }
 
 type Meter struct {
@@ -25,12 +23,9 @@ type Meter struct {
 
 func New() *Meter { return &Meter{} }
 
-func (m *Meter) Observe(peak float64, at time.Time) {
-	w := Window{At: at, Peak: peak}
-	if peak > 0 {
-		db := 20 * math.Log10(peak)
-		w.DBFS = &db
-	}
+func (m *Meter) Observe(peak uint32, at time.Time) {
+	peak = min(peak, 1<<31)
+	w := Window{At: at, Peak: peak, DB: peakDB(peak)}
 	m.mu.Lock()
 	w.Sequence = m.latest.Sequence + 1
 	m.latest = w
@@ -39,28 +34,22 @@ func (m *Meter) Observe(peak float64, at time.Time) {
 
 func (m *Meter) Snapshot() Window { m.mu.Lock(); defer m.mu.Unlock(); return m.latest }
 
-// ReadPeaks accepts little-endian interleaved float32 peak amplitudes, such as
-// PipeWire stream.monitor=true produces. Sampling here affects observation only.
-func (m *Meter) ReadPeaks(r io.Reader, rate, channels int) error {
-	if rate < 5 || rate > 1000 || channels < 1 || channels > 64 {
-		return errors.New("invalid peak monitor format")
+//go:generate sh -c "go run meter_tables_gen.go > meter_tables.go"
+
+// Rounded whole dBFS from precomputed amplitude boundaries. No logarithm or
+// floating-point conversion runs on the speaker, even for the display value.
+func peakDB(peak uint32) int8 {
+	if peak == 0 {
+		return -128
 	}
-	data := make([]byte, (rate/5)*channels*4)
-	for {
-		if _, err := io.ReadFull(r, data); err != nil {
-			return err
+	lo, hi := 0, len(dbThresholds)
+	for lo < hi {
+		mid := (lo + hi) / 2
+		if peak >= dbThresholds[mid] {
+			hi = mid
+		} else {
+			lo = mid + 1
 		}
-		peak := 0.0
-		for i := 0; i < len(data); i += 4 {
-			v := math.Abs(float64(math.Float32frombits(binary.LittleEndian.Uint32(data[i:]))))
-			if math.IsNaN(v) || math.IsInf(v, 0) {
-				return errors.New("nonfinite peak monitor value")
-			}
-			if v > 16 {
-				return errors.New("invalid peak monitor amplitude")
-			}
-			peak = max(peak, v)
-		}
-		m.Observe(peak, time.Now())
 	}
+	return -int8(lo)
 }

@@ -74,3 +74,20 @@ func TestCloseReleasesBlockedWriter(t *testing.T) {
 		t.Fatal("writer stayed blocked")
 	}
 }
+
+func TestWriteLatestDiscardsOldestToThreshold(t *testing.T) {
+	r := New(16, 8, 4, nil)
+	r.WriteLatest([]byte{1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4})
+	discarded, ok := r.WriteLatest([]byte{5, 5, 5, 5})
+	if !ok || discarded != 12 {
+		t.Fatal(discarded, ok)
+	}
+	buf := make([]byte, 16)
+	if n := r.Read(buf); n != 8 || !bytes.Equal(buf[:8], []byte{4, 4, 4, 4, 5, 5, 5, 5}) {
+		t.Fatal(n, buf)
+	}
+	r.Close()
+	if _, ok := r.WriteLatest(buf[:4]); ok {
+		t.Fatal("write accepted after close")
+	}
+}

@@ -482,6 +482,15 @@ tbody tr.drop-before td {
 #blocked button {
   margin-left: 12px;
 }
+#inactive-tab {
+  background: var(--panel, #1d1d1d);
+  color: var(--muted, #b8b8b8);
+  padding: 10px 24px;
+  font-size: 12px;
+}
+#inactive-tab button {
+  margin-left: 12px;
+}
 #video {
   width: 100%;
   height: auto;
@@ -844,13 +853,6 @@ tbody tr.drop-before td {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.folder-add {
-  font-size: 20px;
-  width: 34px;
-  height: 34px;
-  padding: 0;
-  flex: none;
-}
 /* Playback diagnostics */
 .nerd-setting {
   display: grid;
@@ -910,12 +912,6 @@ tbody tr.drop-before td {
   list-style: none;
   color: var(--muted);
 }
-@media (max-width: 760px) {
-  .folder-add {
-    width: 44px;
-    height: 44px;
-  }
-}
 .settings-panel {
   width: min(420px, calc(100vw - 24px));
 }
@@ -956,6 +952,8 @@ tbody tr.drop-before td {
 .output-volume { display: flex; align-items: center; gap: 8px; width: 100%; font-size: 11px; padding: 3px 6px; }
 .output-volume input { flex: 1; min-width: 60px; accent-color: var(--accent); }
 .output-volume output { min-width: 100px; text-align: right; font-variant-numeric: tabular-nums; }
+.output-keep { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; font-size: 11px; padding: 3px 6px; }
+.output-keep select { font: inherit; }
 .device-settings .device-card {
   cursor: default;
 }

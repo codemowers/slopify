@@ -19,6 +19,7 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 
+	"github.com/codemowers/slopify/internal/auth"
 	"github.com/codemowers/slopify/internal/httpx"
 	"github.com/codemowers/slopify/web"
 )
@@ -46,39 +47,42 @@ type login struct {
 }
 
 type frontend struct {
-	oauth    oauth2.Config
-	verifier *oidc.IDTokenVerifier
-	key      []byte
-	secure   bool
-	audience string
+	anonymous bool
+	oauth     oauth2.Config
+	verifier  *oidc.IDTokenVerifier
+	key       []byte
+	secure    bool
+	audience  string
 }
 
 func main() {
 	ctx, stop := httpx.SignalContext()
 	defer stop()
 
-	provider, err := oidc.NewProvider(ctx, httpx.Env("OIDC_ISSUER"))
-	if err != nil {
-		slog.Error("discovering OIDC provider", "err", err)
-		os.Exit(1)
+	g := &frontend{anonymous: auth.AnonymousEnabled()}
+	if !g.anonymous {
+		provider, err := oidc.NewProvider(ctx, httpx.Env("OIDC_ISSUER"))
+		if err != nil {
+			slog.Error("discovering OIDC provider", "err", err)
+			os.Exit(1)
+		}
+		// The OIDCClient secret lists redirect URIs comma-separated; the first is ours.
+		redirect, _, _ := strings.Cut(httpx.Env("OIDC_REDIRECT_URI"), ",")
+		clientID := httpx.Env("OIDC_CLIENT_ID")
+		g = &frontend{
+			oauth: oauth2.Config{
+				ClientID:     clientID,
+				ClientSecret: httpx.Env("OIDC_CLIENT_SECRET"),
+				Endpoint:     provider.Endpoint(),
+				RedirectURL:  redirect,
+				Scopes:       []string{oidc.ScopeOpenID, "profile", "email", "offline_access", "slopify:library:read", "slopify:players:read", "slopify:players:write", "slopify:stream"},
+			},
+			verifier: provider.Verifier(&oidc.Config{ClientID: clientID}),
+			key:      []byte(httpx.Env("SESSION_KEY")),
+			secure:   strings.HasPrefix(redirect, "https://"),
+			audience: httpx.Env("OIDC_AUDIENCE"),
+		}
 	}
-	// The OIDCClient secret lists redirect URIs comma-separated; the first is ours.
-	redirect, _, _ := strings.Cut(httpx.Env("OIDC_REDIRECT_URI"), ",")
-	clientID := httpx.Env("OIDC_CLIENT_ID")
-	g := &frontend{
-		oauth: oauth2.Config{
-			ClientID:     clientID,
-			ClientSecret: httpx.Env("OIDC_CLIENT_SECRET"),
-			Endpoint:     provider.Endpoint(),
-			RedirectURL:  redirect,
-			Scopes:       []string{oidc.ScopeOpenID, "profile", "email", "offline_access", "slopify:library:read", "slopify:players:read", "slopify:players:write", "slopify:stream"},
-		},
-		verifier: provider.Verifier(&oidc.Config{ClientID: clientID}),
-		key:      []byte(httpx.Env("SESSION_KEY")),
-		secure:   strings.HasPrefix(redirect, "https://"),
-		audience: httpx.Env("OIDC_AUDIENCE"),
-	}
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {})
 	mux.HandleFunc("GET /auth/login", g.login)
@@ -87,7 +91,11 @@ func main() {
 	mux.Handle("GET /api/me", g.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		u, _ := g.session(r)
 		u.Token = nil
-		httpx.JSON(w, u)
+		httpx.JSON(w, struct {
+			user
+			DemoMusic bool `json:"demoMusic,omitempty"`
+			Anonymous bool `json:"anonymous,omitempty"`
+		}{u, os.Getenv("DEMO_MUSIC") == "true", g.anonymous})
 	})))
 	mux.HandleFunc("POST /auth/token", g.token)
 	static := http.FileServerFS(web.FS)
@@ -164,6 +172,9 @@ func (g *frontend) setCookie(w http.ResponseWriter, name, value string, ttl time
 }
 
 func (g *frontend) session(r *http.Request) (user, bool) {
+	if g.anonymous {
+		return user{Subject: "anonymous", Name: "Anonymous", Expires: time.Now().Add(sessionTTL)}, true
+	}
 	var u user
 	c, err := r.Cookie(sessionCookie)
 	if err != nil || !g.open(c.Value, &u) || time.Now().After(u.Expires) {
@@ -184,6 +195,10 @@ func (g *frontend) require(h http.Handler) http.Handler {
 }
 
 func (g *frontend) login(w http.ResponseWriter, r *http.Request) {
+	if g.anonymous {
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
 	ret := r.URL.Query().Get("return")
 	if !strings.HasPrefix(ret, "/") || strings.HasPrefix(ret, "//") || strings.HasPrefix(ret, "/\\") {
 		ret = "/"
@@ -194,6 +209,10 @@ func (g *frontend) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *frontend) callback(w http.ResponseWriter, r *http.Request) {
+	if g.anonymous {
+		http.NotFound(w, r)
+		return
+	}
 	var l login
 	c, err := r.Cookie(loginCookie)
 	if err != nil || !g.open(c.Value, &l) || time.Now().After(l.Expires) || r.URL.Query().Get("state") != l.State {
@@ -241,6 +260,10 @@ func (g *frontend) callback(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *frontend) logout(w http.ResponseWriter, r *http.Request) {
+	if g.anonymous {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
 	g.setCookie(w, sessionCookie, "", -time.Second)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -251,6 +274,14 @@ func (g *frontend) token(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if r.Header.Get("Content-Type") != "application/json" {
 		http.Error(w, "expected application/json", http.StatusUnsupportedMediaType)
+		return
+	}
+	if g.anonymous {
+		if !auth.AnonymousRequest(r) {
+			http.Error(w, "same-origin Slopify request required", http.StatusForbidden)
+			return
+		}
+		httpx.JSON(w, map[string]any{"anonymous": true, "accessToken": "", "expiresAt": time.Now().Add(sessionTTL)})
 		return
 	}
 	u, ok := g.session(r)

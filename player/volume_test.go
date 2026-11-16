@@ -108,3 +108,45 @@ func TestMixerReportsHardwareGainAndMute(t *testing.T) {
 		t.Fatalf("level 0 is hardware mute: %v %+v", err, m.snapshot())
 	}
 }
+
+// Displayed levels above 58 share hardware steps on the Amp2 (59 rounds to 60's
+// raw value), so a naive detent from 60 down rewrote 60 and the knob stuck.
+func TestKnobStepsAcrossSharedHardwareLevels(t *testing.T) {
+	ctx := context.Background()
+	device := &fakeMixer{mapping: amp2Mapping, raw: amp2Raw}
+	m, err := startMixer(ctx, device, "card", "Digital", 0, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, delta := range []int{1, -1} {
+		for steps := 0; steps < 200; steps++ {
+			before := m.snapshot().Level
+			if delta > 0 && before == 100 || delta < 0 && before == 0 {
+				break
+			}
+			if err := m.adjust(ctx, delta); err != nil {
+				t.Fatal(err)
+			}
+			after := m.snapshot().Level
+			if delta > 0 && after <= before || delta < 0 && after >= before {
+				t.Fatalf("detent %+d from %d left level at %d", delta, before, after)
+			}
+		}
+	}
+	if m.snapshot().Level != 0 {
+		t.Fatalf("knob did not return to 0: %d", m.snapshot().Level)
+	}
+	// The configured cap still wins over stepping past a shared level.
+	capped, err := startMixer(ctx, &fakeMixer{mapping: amp2Mapping, raw: amp2Raw}, "card", "Digital", 0, 80, 79)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if err := capped.adjust(ctx, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := capped.snapshot().Level; got > 80 {
+		t.Fatalf("cap exceeded: %d", got)
+	}
+}

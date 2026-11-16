@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +34,17 @@ const (
 	maxPlayers            = 100
 	streamTTL             = 12 * time.Hour
 	browserReconnectGrace = 30 * time.Second
+	deviceReconnectGrace  = 30 * time.Second
+	// A tab that said it is closing gets only long enough to come back from a reload.
+	browserGoneGrace = 5 * time.Second
+
+	// An installed web app can keep playing while its event stream is down, as
+	// Android does after the screen locks. It stays selected for the rest of its
+	// track and this much more, renewed by each report; tracks of unknown length
+	// get the fallback, and no allowance exceeds the maximum.
+	backgroundSlack    = time.Minute
+	backgroundFallback = 10 * time.Minute
+	backgroundMax      = 4 * time.Hour
 )
 
 // Entry is one queue item. IDs are unique within a player, so edits to the
@@ -55,10 +67,21 @@ type Entry struct {
 	VideoCodec string     `json:"videoCodec,omitempty"`
 }
 
+// PauseEvent records the immutable attribution of a pause.
+type PauseEvent struct {
+	Name   string    `json:"name"`
+	Source string    `json:"source"`
+	At     time.Time `json:"at"`
+}
+
 // Player is the authoritative state of one output. Devices running
 // slopify-player and browser tabs follow it and report back what they do.
 type Player struct {
-	Volume *volume.Control `json:"volume,omitempty"`
+	Pause *PauseEvent `json:"pause,omitempty"`
+	// QueueGroup is opaque identity, never a playback credential or LAN inventory.
+	QueueGroup   string          `json:"queueGroup,omitempty"`
+	QueueCommand string          `json:"queueCommand,omitempty"`
+	Volume       *volume.Control `json:"volume,omitempty"`
 	// User queues are durable; outputs are replaceable playback targets.
 	OutputID     string   `json:"outputId,omitempty"`
 	OutputIDs    []string `json:"outputIds,omitempty"`
@@ -77,7 +100,7 @@ type Player struct {
 	Available    bool     `json:"available"`
 	Model        string   `json:"model,omitempty"`
 	Address      string   `json:"address,omitempty"`
-	// Formats a device decodes itself; everything else is sent as FLAC.
+	// Formats is what a device declares when connecting; the current player sends none.
 	Formats []string `json:"formats,omitempty"`
 	// TokenHash pairs a device with the secret it generated; never published.
 	TokenHash string `json:"tokenHash,omitempty"`
@@ -93,6 +116,14 @@ type Player struct {
 	Version uint64 `json:"version"`
 	// Blocked means a browser tab could not start audio without a user gesture.
 	Blocked bool `json:"blocked,omitempty"`
+	// Background marks a browser output running as an installed app, which may
+	// keep playing while its event stream is down.
+	Background bool `json:"background,omitempty"`
+	// IdleSince is when playback last stopped; zero while playing.
+	IdleSince time.Time `json:"idleSince,omitzero"`
+	// OutputKeep is, per output, the minutes it stays selected after playback
+	// stops: zero means always, and outputs without an entry use the default.
+	OutputKeep map[string]int `json:"outputKeep,omitempty"`
 	// Repeat continues from the first entry when the queue ends.
 	Repeat bool   `json:"repeat,omitempty"`
 	NextID uint64 `json:"nextId"`
@@ -102,6 +133,9 @@ type Player struct {
 	reportReceiver       string
 	links                int // open event streams of this output
 	disconnectTimer      *time.Timer
+	lingerTimer          *time.Timer
+	lingerUntil          time.Time // a disconnected background output counts as reachable until then
+	leaving              bool      // the tab reported it is closing
 	connectionGeneration uint64
 	disconnect           func() // ends a device's event stream
 }
@@ -166,6 +200,11 @@ func (s *store) load() error {
 			p.State = Paused
 		}
 		p.UpdatedAt = time.Now()
+		// State saved before idle tracking starts its clock now, so deploying
+		// this cannot release every pin at once.
+		if p.State != Playing && p.IdleSince.IsZero() {
+			p.IdleSince = time.Now()
+		}
 		s.players[p.ID] = p
 	}
 	// Existing hardware ownership can only be inferred from one durable queue.
@@ -258,6 +297,20 @@ func (s *store) persist() {
 func (s *store) marshal(p *Player) []byte {
 	p.Position, p.UpdatedAt = s.pos(p), time.Now()
 	public := *p
+	if q := s.outputQueue(p.ID); p.Kind == Device && q != nil {
+		if q.QueueGroup == "" {
+			q.QueueGroup = rand.Text()
+			select {
+			case s.dirty <- struct{}{}:
+			default:
+			}
+		}
+		public.QueueGroup = q.QueueGroup
+		public.QueueCommand = q.QueueCommand
+	} else {
+		public.QueueGroup = ""
+		public.QueueCommand = ""
+	}
 	// Device clients need the detached current entry while the user queue is empty.
 	if p.Kind != User && p.CurrentEntry != nil && p.index(p.Current) < 0 {
 		public.Queue = append([]Entry{*p.CurrentEntry}, p.Queue...)
@@ -320,9 +373,89 @@ func (s *store) pos(p *Player) float64 {
 	return pos
 }
 
-func (p *Player) available() bool { return p.Kind == WebSink || p.Connected }
+func (p *Player) available() bool { return p.Kind == WebSink || p.reachable() }
+
+// reachable includes device reconnect grace and background browser allowance.
+func (p *Player) reachable() bool {
+	return p.Connected || (!p.lingerUntil.IsZero() && time.Now().Before(p.lingerUntil))
+}
+
+// linger keeps a disconnected background output playing and selected until its
+// track should have ended, plus slack. Calling it again renews the allowance;
+// a connected, paused or ordinary output gets none.
+func (s *store) linger(p *Player) {
+	if p.lingerTimer != nil {
+		p.lingerTimer.Stop()
+		p.lingerTimer = nil
+	}
+	p.lingerUntil = time.Time{}
+	if p.Connected || !p.Background || p.State != Playing {
+		return
+	}
+	allow := backgroundFallback
+	if e := p.entry(p.Current); e != nil && e.Duration > 0 {
+		allow = time.Duration(math.Max(e.Duration-s.pos(p), 0)*float64(time.Second)) + backgroundSlack
+	} else if p.CurrentEntry != nil && p.CurrentEntry.ID == p.Current && p.CurrentEntry.Duration > 0 {
+		allow = time.Duration(math.Max(p.CurrentEntry.Duration-s.pos(p), 0)*float64(time.Second)) + backgroundSlack
+	}
+	allow = min(max(allow, backgroundSlack), backgroundMax)
+	p.lingerUntil = time.Now().Add(allow)
+	generation, deadline := p.connectionGeneration, p.lingerUntil
+	p.lingerTimer = time.AfterFunc(allow, func() { s.finishLinger(p, generation, deadline) })
+}
+
+// leave handles a closing tab's report, which may arrive before or after its
+// event stream ends: either way the output pauses after the short grace.
+func (s *store) leave(p *Player) {
+	p.leaving = true
+	if p.Connected || p.State != Playing {
+		return
+	}
+	if p.lingerTimer != nil {
+		p.lingerTimer.Stop()
+		p.lingerTimer, p.lingerUntil = nil, time.Time{}
+	}
+	if p.disconnectTimer != nil {
+		p.disconnectTimer.Stop()
+	}
+	generation := p.connectionGeneration
+	p.disconnectTimer = time.AfterFunc(browserGoneGrace, func() { s.finishBrowserDisconnect(p, generation) })
+	s.changed(p)
+}
+
+// finishLinger pauses a background output that went silent past its allowance.
+func (s *store) finishLinger(p *Player, generation uint64, deadline time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.players[p.ID] != p || p.Connected || p.connectionGeneration != generation || p.lingerUntil != deadline {
+		return
+	}
+	p.lingerTimer, p.lingerUntil = nil, time.Time{}
+	if p.State == Playing {
+		s.pause(p)
+	}
+	s.changed(p)
+}
 
 func (p *Player) setPos(pos float64, state string) {
+	if state != Playing {
+		p.lingerUntil = time.Time{}
+		if p.lingerTimer != nil {
+			p.lingerTimer.Stop()
+			p.lingerTimer = nil
+		}
+	}
+	if state != Paused {
+		p.Pause = nil
+	} else if p.State != Paused {
+		p.Pause = &PauseEvent{Name: "Slopify", Source: "Playback state", At: time.Now()}
+	}
+	switch {
+	case state == Playing:
+		p.IdleSince = time.Time{}
+	case p.State == Playing || p.IdleSince.IsZero():
+		p.IdleSince = time.Now()
+	}
 	p.Position, p.State, p.UpdatedAt = pos, state, time.Now()
 }
 
@@ -435,13 +568,13 @@ type command struct {
 	Outputs  []string `json:"outputs"`
 	Name     string   `json:"name"`
 	Repeat   bool     `json:"repeat"`
+	// Minutes is an output's keep-selected timeout for the keep op; 0 is always.
+	Minutes int `json:"minutes"`
+	// From is the browser output that sent a command, so that Play can select it
+	// when every other pin has lapsed.
+	From string `json:"from,omitempty"`
 }
 
-func (s *store) command(id string, c command) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.commandLocked(id, c)
-}
 func (s *store) commandLocked(id string, c command) error {
 	p, ok := s.players[id]
 	if !ok {
@@ -450,16 +583,6 @@ func (s *store) commandLocked(id string, c command) error {
 	switch c.Op {
 	case "adopt":
 		return errBadRequest // claiming requires an authenticated user
-	case "rename":
-		if c.Name == "" && p.Kind == Device {
-			p.NameSet = false
-			refreshDeviceName(p)
-			break
-		}
-		if c.Name == "" || len(c.Name) > 64 {
-			return errBadRequest
-		}
-		p.Name, p.NameSet = c.Name, true
 	case "forget":
 		if p.disconnect != nil {
 			p.disconnect()
@@ -631,14 +754,29 @@ type report struct {
 	Position float64 `json:"position"`
 	Ended    bool    `json:"ended"`
 	Blocked  bool    `json:"blocked"`
+	// Gone is a closing tab's last word: pause soon unless the same output returns.
+	Gone bool `json:"gone"`
 }
 
 func (s *store) report(id string, r report) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.reportLocked(id, r)
+}
+
+// reportLocked lets browser ownership validation and the resulting snapshot share
+// the same lock as the playback mutation.
+func (s *store) reportLocked(id string, r report) error {
 	p, ok := s.players[id]
 	if !ok || p.Kind == Device && !p.Adopted {
 		return errNotFound
+	}
+	if r.Gone {
+		if p.Kind != Browser {
+			return errBadRequest
+		}
+		s.leave(p)
+		return nil
 	}
 	if r.Entry != p.Current || r.Version != p.Version {
 		return nil // about a track or command the output has not caught up with
@@ -670,9 +808,23 @@ func (s *store) report(id string, r report) error {
 	default:
 		return errBadRequest
 	}
+	if oldState != Paused && p.State == Paused {
+		source := "Output playback report"
+		if r.Blocked {
+			source = "Browser autoplay blocked"
+		}
+		p.Pause = &PauseEvent{Name: p.Name, Source: source, At: time.Now()}
+	}
 	s.changed(p)
 	if q != nil && q.OutputID == id && (oldState != p.State || oldCurrent != p.Current) {
-		s.sendQueue(q)
+		if r.Ended && oldState == Playing && p.State == Playing && p.index(p.Current) > p.index(oldCurrent) {
+			s.sendQueueContinuous(q)
+		} else {
+			s.sendQueue(q)
+		}
+	}
+	if !p.Connected && p.Background {
+		s.linger(p) // a report proves the app is still playing: renew for its new track
 	}
 	return nil
 }
@@ -701,6 +853,12 @@ func (s *store) attach(id string, init func() *Player, check func(*Player) error
 		p.disconnectTimer.Stop()
 		p.disconnectTimer = nil
 	}
+	if p.lingerTimer != nil {
+		p.lingerTimer.Stop()
+		p.lingerTimer = nil
+	}
+	p.lingerUntil = time.Time{}
+	p.leaving = false
 	p.connectionGeneration++
 	p.links++
 	p.Connected = true
@@ -727,13 +885,25 @@ func (s *store) attach(id string, init func() *Player, check func(*Player) error
 			s.removed(id)
 			return
 		}
-		if p.Kind == Browser && p.State == Playing {
+		if p.Kind == Browser && p.State == Playing && p.Background && !p.leaving {
+			s.linger(p)
+		} else if p.Kind == Browser && p.State == Playing {
 			// Network changes can interrupt SSE while buffered audio continues.
 			// Reconnecting the same tab cancels this timer without issuing pause.
+			grace := browserReconnectGrace
+			if p.leaving {
+				grace = browserGoneGrace
+			}
 			generation := p.connectionGeneration
-			p.disconnectTimer = time.AfterFunc(browserReconnectGrace, func() { s.finishBrowserDisconnect(p, generation) })
+			p.disconnectTimer = time.AfterFunc(grace, func() { s.finishBrowserDisconnect(p, generation) })
+		} else if p.Kind == Device && p.State == Playing {
+			// The device may still have buffered audio while its event stream reconnects.
+			p.lingerUntil = time.Now().Add(deviceReconnectGrace)
+			generation := p.connectionGeneration
+			p.disconnectTimer = time.AfterFunc(deviceReconnectGrace, func() { s.finishDeviceDisconnect(p, generation) })
 		} else if p.Kind != WebSink && p.State == Playing {
 			p.setPos(s.pos(p), Paused)
+			p.Pause = &PauseEvent{Name: p.Name, Source: "Output disconnected", At: time.Now()}
 		}
 		s.changed(p)
 	}, nil
@@ -749,8 +919,26 @@ func (s *store) finishBrowserDisconnect(p *Player, generation uint64) {
 	p.disconnectTimer = nil
 	if p.State == Playing {
 		s.pause(p)
+		p.Pause = &PauseEvent{Name: p.Name, Source: "Browser disconnected", At: time.Now()}
 		s.changed(p)
 	}
+}
+
+// A stale disconnect callback must not pause a reconnected device or replace
+// the reason for an explicit pause received during its reconnect grace.
+func (s *store) finishDeviceDisconnect(p *Player, generation uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.players[p.ID] != p || p.links > 0 || p.connectionGeneration != generation {
+		return
+	}
+	p.disconnectTimer = nil
+	p.lingerUntil = time.Time{}
+	if p.State == Playing {
+		s.pause(p)
+		p.Pause = &PauseEvent{Name: p.Name, Source: "Output disconnected", At: time.Now()}
+	}
+	s.changed(p)
 }
 
 // streamURL returns a signed URL of the original file of a device's entry.

@@ -1,18 +1,28 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Slopify speaker</title><link rel="stylesheet" href="/style.css"><script src="/requests.js" defer></script><script src="/sources.js" defer></script><script src="/app.js" defer></script></head>
-<body><main><header><h1>Slopify speaker</h1><p id="connection" role="status">Connecting to speaker…</p></header>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Slopify speaker</title><link rel="stylesheet" href="/style.css"><script src="/requests.js" defer></script><script src="/sources.js" defer></script><script src="/status-state.js" defer></script><script src="/app.js" defer></script></head>
+<body><main><header><div class="speaker-title"><h1>Slopify speaker</h1><details id="player-menu"><summary aria-label="Player menu" title="Player menu"><span aria-hidden="true">☰</span></summary><div class="player-menu-panel"><div id="routing-settings" hidden><label for="source-mode">Automatic selection</label><select id="source-mode"><option value="off" disabled>Off - unpin source to enable</option><option value="recent">Recent — latest to start making sound</option><option value="priority">Priority — first sounding source in this order</option></select><p class="muted">Pin Slopify to follow its queue through automatic leader changes. Pin a multicast source to stay with that sender. Unlock to resume automatic source selection. Drag cards or use the arrows to reorder in any mode. Priority mode uses this order to choose a source.</p><div id="sound-guard"><label id="sound-duration-label" for="sound-duration">Minimum sound duration</label> <output id="sound-duration-value"></output><input id="sound-duration" type="range" min="0" max="2000" step="100" value="500"><p id="sound-duration-help" class="muted">Recent mode only: require sustained sound before switching. Short notifications won’t take over; notifications mixed into the selected source still play.</p></div><div id="priority-takeover" hidden><label for="priority-takeover-delay">Higher-priority takeover delay</label> <output id="priority-takeover-value">Immediate</output><input id="priority-takeover-delay" type="range" min="0" max="10000" step="100" value="0"><p class="muted">Require continuous sound before a higher-priority source takes over. Set 2 seconds to ignore brief terminal bells. Manual source selection stays immediate.</p></div><label id="transition-sounds-label"><input id="transition-sounds" type="checkbox" checked> Play quiet cues for source changes, play, pause, seek and buffering</label></div><a id="device-settings" hidden target="_blank" rel="noopener noreferrer">Player settings…</a></div></details></div><p id="hardware-description" class="muted" hidden></p><p id="connection" role="status">Connecting to speaker…</p></header>
+<nav id="sibling-players" aria-label="Other Slopify players" hidden></nav>
 <p id="status-error" role="status" hidden></p><section id="standalone-output" hidden><h2>Output</h2><div id="volume-fallback"></div><p id="playback-progress" role="status" hidden><span class="routing-spinner" aria-hidden="true"></span><span></span></p><div id="streams"></div></section>
-<div id="sources" hidden><label for="source-mode">Automatic selection</label><select id="source-mode"><option value="off" disabled>Off - unpin source to enable</option><option value="recent">Recent — latest to start making sound</option><option value="priority">Priority — first sounding source in this order</option></select><p class="muted">Click an open lock to pin a source, or the closed lock to resume automatic selection. In Priority mode, drag cards to reorder; the arrows work with a keyboard.</p><div id="sound-guard"><label id="sound-duration-label" for="sound-duration">Minimum sound duration</label> <output id="sound-duration-value"></output><input id="sound-duration" type="range" min="0" max="2000" step="100" value="500"><p id="sound-duration-help" class="muted">Recent mode only: require sustained sound before switching. Short notifications won’t take over; notifications mixed into the selected source still play.</p></div><p id="source-error" role="status"></p><div id="source-routing"><svg id="source-connections" aria-hidden="true"></svg><div id="source-cards"></div><div id="source-output"><span class="eyebrow">HARDWARE OUTPUT</span><h3 id="output-name">Amplifier</h3><p id="output-device" class="muted" hidden></p><p id="output-format" class="muted"></p><div id="hardware-volume" hidden><p id="volume"></p><div id="volume-controls" hidden><label for="volume-slider">Hardware volume</label><input id="volume-slider" type="range" step="1"><button id="mute" type="button" aria-pressed="false">Mute</button></div></div><p id="routing-progress" role="status" hidden><span class="routing-spinner" aria-hidden="true"></span><span id="routing-progress-text"></span><button id="switch-now" type="button" hidden>Switch now</button></p><canvas id="output-envelope" width="750" height="130" aria-label="Recent selected-source peak envelope"></canvas></div></div></div>
+<div id="sources" hidden><p id="source-error" role="status"></p><div id="source-routing"><svg id="source-connections" aria-hidden="true"></svg><div id="source-cards"></div><div id="source-outputs"><div id="source-output"><span class="eyebrow">HARDWARE OUTPUT</span><h3 id="output-name">Amplifier</h3><p id="output-device" class="muted" hidden></p><p id="output-format" class="muted"></p><div id="hardware-volume" hidden><p id="volume"></p><div id="volume-controls" hidden><label for="volume-slider">Hardware volume</label><input id="volume-slider" type="range" step="1"><button id="mute" type="button" aria-pressed="false">Mute</button></div></div><p id="routing-progress" role="status" hidden><span class="routing-spinner" aria-hidden="true"></span><span id="routing-progress-text"></span><button id="switch-now" type="button" hidden>Switch now</button></p><canvas id="output-envelope" width="750" height="130" aria-label="Recent selected-source peak envelope"></canvas></div><div id="source-multicast" hidden><span class="eyebrow">MULTICAST RECEIVERS</span><h3 id="multicast-name"></h3><p id="multicast-empty" class="muted">No receiver reports yet. Receivers without RTCP reporting are not listed.</p><div id="multicast-receivers"></div><p class="muted">Reports confirm network reception, not audible playback.</p><details class="multicast-settings"><summary>Multicast stream</summary><p id="multicast-group" class="muted"></p><p id="multicast-format" class="muted"></p><p id="multicast-counters" class="muted"></p><p id="multicast-error" role="status" hidden></p><div id="multicast-buffer" class="source-buffer"></div><details id="multicast-listen"><summary>Listen in VLC / mpv</summary>
+<p>Start Slopify playback first. In VLC, open the SDP URL below using Media → Open Network Stream, or download the SDP and open it as a file.</p>
+<p><a href="/multicast.sdp" download="slopify-multicast.sdp">Download SDP</a> · <button type="button" data-multicast-playlist="m3u">Download M3U</button> · <button type="button" data-multicast-playlist="pls">Download PLS</button></p>
+<pre id="multicast-listen-url"></pre><button type="button" data-copy-lan="multicast-listen-url">Copy URL</button>
+<h4>Windows XP SP3 — VLC 3, 32-bit</h4><pre id="multicast-vlc-windows"></pre><button type="button" data-copy-lan="multicast-vlc-windows">Copy commands</button>
+<h4>Linux — VLC</h4><pre id="multicast-vlc"></pre><button type="button" data-copy-lan="multicast-vlc">Copy commands</button>
+<h4>Linux — mpv</h4><pre id="multicast-mpv"></pre><button type="button" data-copy-lan="multicast-mpv">Copy commands</button>
+<p>VLC needs its RTP/RTSP/SDP (Live555) module; some Linux packages omit it. VLC supports L16/L24 audio. Slopify's L32 extension is not compatible. Reopen the URL when the audio format changes; a downloaded SDP describes only the format at download time. M3U/PLS fetch the current SDP when opened. XP's built-in Windows Media Player cannot receive this PCM/RTP stream.</p>
+</details></details></div></div></div></div>
 
       <div class="sender-setup">
         <h2>Send audio here</h2>
         <p id="sender-intro">Ubuntu 24.04/26.04 can send through Pulse TCP. Keep sender and speaker on a reachable network.</p>
         <p>Speaker address: <code id="lan-audio-host"></code> (from this page’s address).</p>
         <div class="sender-tabs" role="tablist" aria-label="Audio connection method">
-          <button id="tab-zeroconf" type="button" role="tab" aria-selected="true" aria-controls="pulse-help" tabindex="0">Zeroconf native</button>
+          <button id="tab-zeroconf" type="button" role="tab" aria-selected="true" aria-controls="pulse-help" tabindex="0">PulseAudio Zeroconf</button>
           <button id="tab-airplay" hidden type="button" role="tab" aria-selected="false" aria-controls="raop-help" tabindex="-1">AirPlay</button>
-          <button id="tab-fixed" type="button" role="tab" aria-selected="false" aria-controls="fixed-help" tabindex="-1">Fixed</button>
-          <button id="tab-esound" hidden type="button" role="tab" aria-selected="false" aria-controls="esound-help" tabindex="-1">Windows XP/2000</button>
+          <button id="tab-fixed" type="button" role="tab" aria-selected="false" aria-controls="fixed-help" tabindex="-1">PulseAudio Fixed</button>
+          <button id="tab-esound" hidden type="button" role="tab" aria-selected="false" aria-controls="esound-help" tabindex="-1">ESound (Windows XP/2000)</button>
+          <button id="tab-rtp" hidden type="button" role="tab" aria-selected="false" aria-controls="rtp-help" tabindex="-1">Multicast RTP</button>
         </div>
         <div id="ubuntu-tools">
         <h3>Ubuntu command-line tools</h3>
@@ -44,9 +54,10 @@ systemctl --user restart pipewire-pulse</code></pre>
         <button type="button" data-copy-lan="lan-raop-system">Copy system-wide AirPlay discovery</button>
         <p>Choose one scope. The restart affects your current user; other users pick up the setting at their next audio-session start. To disable persistent AirPlay discovery, remove 30-airplay-discovery.conf from the chosen location and restart that user's PipeWire-Pulse session.</p>
         <h3>macOS, iPhone and iPad</h3>
-        <p>Open Control Centre, choose the audio output/AirPlay selector and select this speaker’s advertised name. On macOS, the output is also available in Sound settings.</p>
+        <p>Open Control Centre, choose the audio output/AirPlay selector and select this speaker’s advertised name. On macOS, the output is also available in Sound settings. The speaker receives AirPlay 1 audio: 16-bit 44.1 kHz ALAC, without AirPlay 2 multi-room grouping.</p>
+        <p id="raop-apple-off" hidden>Apple devices need AirPlay encryption, which is off on this speaker. On OpenWrt, enable it in the Slopify player settings; elsewhere start the player with <code>-raop-key</code>.</p>
         <h3>If the speaker is missing</h3>
-        <p>Check that Shairport and mDNS discovery are running on the speaker and that the LAN/VPN permits multicast DNS (UDP 5353) and the receiver’s audio ports. If module loading fails, check that the laptop’s PipeWire installation includes its RAOP discovery module. To remove temporary discovery, find module-raop-discover with <code>pactl list short modules</code>, then run <code>pactl unload-module MODULE_ID</code>.</p>
+        <p>Check that the AirPlay receiver and mDNS discovery are running on the speaker and that the LAN/VPN permits multicast DNS (UDP 5353) and the receiver’s audio ports. If module loading fails, check that the laptop’s PipeWire installation includes its RAOP discovery module. To remove temporary discovery, find module-raop-discover with <code>pactl list short modules</code>, then run <code>pactl unload-module MODULE_ID</code>.</p>
         </div>
         <div id="pulse-help" role="tabpanel" aria-labelledby="tab-zeroconf">
         <h3>Automatic discovery on the same LAN</h3>
@@ -79,7 +90,7 @@ pactl list short sinks</code></pre>
         <p>mDNS normally stays on one network segment. Across a routed subnet or VPN, use this explicit address instead; the speaker’s TCP port 4713 must be reachable. These commands use the address you opened this page with.</p>
         <p>Run in your laptop terminal. Use sudo only for installing the tools. Add this output once per audio session.</p>
         <pre><code id="lan-audio-connect">pactl unload-module module-tunnel-sink 2&gt;/dev/null
-pactl load-module module-tunnel-sink server=tcp:SPEAKER_IP:4713 sink=SPEAKER_DEVICE sink_name=SPEAKER_SINK "sink_properties='device.description=\"SPEAKER_NAME\"'"
+pactl load-module module-tunnel-sink server=tcp:SPEAKER_IP:4713 sink=SPEAKER_DEVICE sink_name=SPEAKER_SINK "sink_properties='device.description=\"SPEAKER_NAME via PulseAudio\"'"
 pactl set-default-sink SPEAKER_SINK</code></pre>
         <button type="button" data-copy-lan="lan-audio-connect">Copy setup commands</button>
         <h3>One application, skipping the laptop’s audio server</h3>
@@ -90,12 +101,12 @@ pactl set-default-sink SPEAKER_SINK</code></pre>
         <p>Choose the speaker’s advertised hostname under Output in Ubuntu Sound settings. Already-running applications may need to be moved separately with pavucontrol. When source control is enabled, select the laptop under Sources or choose Recent or Priority for automatic switching. Otherwise pause the speaker’s Slopify queue first.</p>
         <p>When the speaker’s hardware-volume bridge is enabled, laptop output volume controls the speaker within its configured limits. New connections inherit the current speaker level; knob and web volume changes update the laptop control. Mute applies to the laptop stream.</p>
         <h3>3. Keep it after login (optional)</h3>
-        <p>For a PipeWire desktop, save this startup configuration after the temporary output works. Restarting desktop audio interrupts playback; the temporary output is replaced on restart.</p>
+        <p>For a PipeWire desktop, save this startup configuration after the temporary output works. This uses 30-slopify.conf, separate from 30-slopify-rtp.conf. Unicast and multicast outputs can coexist. Restarting desktop audio interrupts playback; the temporary output is replaced on restart.</p>
         <pre><code id="lan-audio-persist">mkdir -p ~/.config/pipewire/pipewire-pulse.conf.d
 cat &gt; ~/.config/pipewire/pipewire-pulse.conf.d/30-slopify.conf &lt;&lt;'EOF'
 pulse.cmd = [
   { cmd = "load-module"
-    args = "module-tunnel-sink server=tcp:SPEAKER_IP:4713 sink=SPEAKER_DEVICE sink_name=SPEAKER_SINK sink_properties='device.description=\"SPEAKER_NAME\"'"
+    args = "module-tunnel-sink server=tcp:SPEAKER_IP:4713 sink=SPEAKER_DEVICE sink_name=SPEAKER_SINK sink_properties='device.description=\"SPEAKER_NAME via PulseAudio\"'"
   }
 ]
 EOF
@@ -107,6 +118,70 @@ pactl --server=tcp:SPEAKER_IP:4713 list short sinks
 pactl list short modules</code></pre>
         <button type="button" data-copy-lan="lan-audio-check">Copy checks</button>
         <p>A connection failure usually means the address, speaker receiver or network needs checking. To remove the temporary output, select your laptop speakers, find the module-tunnel-sink ID in the module list, then run <code>pactl unload-module MODULE_ID</code>. For a persistent output, also remove its <code>30-slopify.conf</code> startup file.</p>
+        </div>
+        <div id="rtp-help" role="tabpanel" aria-labelledby="tab-rtp" hidden>
+        <h3>Set up Multicast RTP — PipeWire</h3>
+        <p>This setup creates a persistent laptop output labelled with its multicast group. The group uses two bytes of a Slopify-prefixed machine-ID hash, so it stays stable across reboots without publishing the machine ID. Audio and SAP discovery follow the current route rather than a fixed interface, so docking, undocking or changing networks needs no new setup. Both modules are optional: if one cannot start, laptop audio still works without the multicast output. Multicast uses its own 30-slopify-rtp.conf file; it coexists with PulseAudio discovery and fixed unicast configurations.</p>
+        <p>Rerunning setup replaces this configuration with the same derived group. Restarting PipeWire-Pulse briefly interrupts laptop audio. Afterward, select the multicast output in Sound settings and move already-playing applications if needed.</p>
+        <pre><code id="lan-rtp-persist">(
+set -eu
+grep -Eq '^[0-9a-fA-F]{32}$' /etc/machine-id || { echo 'A valid /etc/machine-id is required.' &gt;&amp;2; exit 1; }
+rtp_hash=$( { printf 'slopify-rtp-v1:'; cat /etc/machine-id; } | sha256sum | cut -c1-4)
+rtp_a=$(printf '%s' "$rtp_hash" | cut -c1-2)
+rtp_b=$(printf '%s' "$rtp_hash" | cut -c3-4)
+rtp_group="239.192.$((0x$rtp_a)).$((0x$rtp_b))"
+mkdir -p ~/.config/pipewire/pipewire-pulse.conf.d
+# Substitute only the group; keep configuration quoting intact.
+sed -e "s/RTP_GROUP/$rtp_group/g" &gt; ~/.config/pipewire/pipewire-pulse.conf.d/30-slopify-rtp.conf &lt;&lt;'EOF'
+context.modules = [
+  { name = libpipewire-module-rtp-sink
+    flags = [ nofail ]
+    args = {
+      destination.ip = "RTP_GROUP"
+      destination.port = 5004
+      net.ttl = 1
+      audio.format = S16BE
+      audio.rate = 48000
+      audio.channels = 2
+      audio.position = [ FL FR ]
+      stream.props = {
+        channelmix.lock-volumes = true
+        node.name = slopify_rtp
+        node.description = "Multicast RTP [RTP_GROUP]"
+        media.class = Audio/Sink
+        node.virtual = true
+      }
+    }
+  }
+  { name = libpipewire-module-rtp-sap
+    flags = [ nofail ]
+    args = {
+      sap.ip = "224.0.0.56"
+      net.ttl = 1
+      stream.rules = [
+        { matches = [ { node.name = slopify_rtp } ]
+          actions = { announce-stream = {} }
+        }
+      ]
+    }
+  }
+]
+EOF
+systemctl --user reset-failed pipewire-pulse 2&gt;/dev/null || true
+systemctl --user restart pipewire-pulse
+printf 'Multicast RTP: %s:5004\n' "$rtp_group"
+)</code></pre>
+        <button type="button" data-copy-lan="lan-rtp-persist">Copy multicast startup</button>
+        <h3>Remove multicast output</h3>
+        <p>Switch to another laptop output, then remove the startup file and restart PipeWire-Pulse:</p>
+        <pre><code id="lan-rtp-remove">rm -f ~/.config/pipewire/pipewire-pulse.conf.d/30-slopify-rtp.conf
+systemctl --user reset-failed pipewire-pulse 2&gt;/dev/null || true
+systemctl --user restart pipewire-pulse</code></pre>
+        <button type="button" data-copy-lan="lan-rtp-remove">Copy removal commands</button>
+        <h3>Connection details</h3>
+        <p>The output uses stereo 48 kHz, 16-bit PCM. Its volume and mute are locked at unity; adjust listening volume on each speaker. Application volume controls still apply. On this speaker, select the RTP source if another source is pinned, or enable Recent/Priority. Every compatible receiver joining this group can receive it.</p>
+        <p>SAP announcements use 224.0.0.56:9875; audio uses the derived group on UDP 5004. Both follow the kernel's route for each packet, normally the current default route; this can be a VPN if it owns the default route. To pin an interface, add local.ifname to both modules in the saved file (PipeWire then skips the output while that interface is absent); to override the group, edit destination.ip and its bracketed output label. Restart PipeWire-Pulse after editing.</p>
+        <p>Cloned machine IDs and hash collisions can share groups; Slopify keeps different sender IPs separately selectable. Audio is unencrypted and unauthenticated. No mDNS discovery or speaker multicast sender is required.</p>
         </div>
         <div id="esound-help" role="tabpanel" aria-labelledby="tab-esound" hidden>
         <h3>Windows XP and 2000: ESound</h3>

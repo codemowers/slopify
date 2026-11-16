@@ -111,8 +111,32 @@ func TestDeviceButtonControlsOnlySelectedQueueAndIgnoresStalePresses(t *testing.
 	if err := s.userCommand("alice", command{Op: "outputs", Outputs: []string{}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.deviceControl(p.ID, deviceControl{Op: "toggle", Version: p.Version, Entry: p.Current}); !errors.Is(err, errBadRequest) {
-		t.Fatal("detached device controlled account queue")
+	// Away from its queue, only Play/Pause works: it brings the speaker back.
+	if err := s.deviceControl(p.ID, deviceControl{Op: "next", Version: p.Version, Entry: p.Current}); !errors.Is(err, errBadRequest) {
+		t.Fatal("detached device skipped tracks in the account queue")
+	}
+	if err := s.deviceControl(p.ID, deviceControl{Op: "toggle", Version: p.Version, Entry: p.Current}); err != nil {
+		t.Fatal(err)
+	}
+	if got := queueOutputs(q); len(got) != 1 || got[0] != p.ID || q.State != Playing {
+		t.Fatalf("press at a detached speaker: outputs %v, state %s; want it selected and playing", got, q.State)
+	}
+}
+
+// A speaker can rejoin only the queue of the account that adopted it.
+func TestDetachedDeviceRejoinsOnlyItsOwnersQueue(t *testing.T) {
+	s := queueStore()
+	defer addBrowser(t, s, "alice", "web-alice")()
+	if err := s.userCommand("alice", command{Op: "append", Tracks: []Entry{{Path: "song.flac", Duration: 120}}, Play: true}); err != nil {
+		t.Fatal(err)
+	}
+	stranger := &Player{ID: "amp", Kind: Device, Owner: queueID("mallory"), Connected: true, Adopted: true}
+	s.players[stranger.ID] = stranger
+	if err := s.deviceControl(stranger.ID, deviceControl{Op: "toggle", Version: stranger.Version}); !errors.Is(err, errBadRequest) {
+		t.Fatalf("device without a queue of its owner: %v", err)
+	}
+	if got := queueOutputs(s.players[queueID("alice")]); len(got) != 1 || got[0] != "web-alice" {
+		t.Fatalf("another account's device joined alice's queue: %v", got)
 	}
 }
 
@@ -229,5 +253,37 @@ func TestDeviceButtonSkipsTracks(t *testing.T) {
 	}
 	if p.Current != first {
 		t.Fatal("prev did not return to the first track")
+	}
+}
+
+func TestDetachedSourcePinRejoinsPlayingQueue(t *testing.T) {
+	s := queueStore()
+	defer addBrowser(t, s, "alice", "web-alice")()
+	if err := s.userCommand("alice", command{Op: "append", Tracks: []Entry{{Path: "song.flac", Duration: 120}}, Play: true}); err != nil {
+		t.Fatal(err)
+	}
+	q := s.players[queueID("alice")]
+	p := &Player{ID: "dac", Kind: Device, Owner: q.ID, Connected: true, Adopted: true, State: Paused, Version: 9}
+	s.players[p.ID] = p
+	current, commandID := q.Current, q.QueueCommand
+	q.setPos(42, Playing)
+	for _, version := range []uint64{8, 9, 9} {
+		if err := s.deviceControl(p.ID, deviceControl{Op: "play-if-sole-output", Version: version}); err != nil {
+			t.Fatal(err)
+		}
+		if version == 8 && len(queueOutputs(q)) != 1 {
+			t.Fatal("stale pin joined queue")
+		}
+	}
+	if got := queueOutputs(q); len(got) != 2 || got[0] != "web-alice" || got[1] != p.ID {
+		t.Fatalf("outputs changed: %v", got)
+	}
+	if q.State != Playing || p.State != Playing || q.Current != current || q.QueueCommand != commandID || s.pos(q) < 42 {
+		t.Fatal("rejoining disturbed playback")
+	}
+	stranger := &Player{ID: "stranger", Kind: Device, Owner: queueID("mallory"), Connected: true, Adopted: true}
+	s.players[stranger.ID] = stranger
+	if err := s.deviceControl(stranger.ID, deviceControl{Op: "play-if-sole-output"}); !errors.Is(err, errBadRequest) {
+		t.Fatalf("cross-owner rejoin: %v", err)
 	}
 }

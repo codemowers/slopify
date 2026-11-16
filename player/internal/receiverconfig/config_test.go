@@ -4,22 +4,16 @@ import "testing"
 
 func TestReceiverConfiguration(t *testing.T) {
 	for _, tc := range []struct {
-		pulse, airplay string
-		wantP, wantA   bool
-	}{
-		{"true", "true", true, true},
-		{"false", "true", false, true},
-		{"true", "false", true, false},
-		{"false", "false", false, false},
-	} {
+		pulse string
+		want  bool
+	}{{"true", true}, {"false", false}, {"", true}} {
 		t.Setenv("SLOPIFY_NAME", "HiFiBerry Amp2")
 		t.Setenv("SLOPIFY_PULSE_ENABLED", tc.pulse)
-		t.Setenv("SLOPIFY_AIRPLAY_ENABLED", tc.airplay)
 		c, err := FromEnv()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if c.Pulse != tc.wantP || c.AirPlay != tc.wantA {
+		if c.Pulse != tc.want || c.Name != "HiFiBerry Amp2" {
 			t.Fatalf("%+v", c)
 		}
 	}

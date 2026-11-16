@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/codemowers/slopify/player/internal/audiometer"
 	"github.com/codemowers/slopify/player/internal/esound"
 	"github.com/codemowers/slopify/player/internal/pulse"
+	"github.com/codemowers/slopify/player/internal/rtp"
 	"github.com/codemowers/slopify/player/internal/upnp"
 )
 
@@ -31,8 +33,10 @@ var errNotRouted = errors.New("source is not selected")
 // ready. No samples are mixed: a selection change closes the device and whatever
 // it still held, and the next source opens it at that source's native format.
 type nativeRouter struct {
-	open     func(id string, f format) (nativeOutput, error)
-	onDevice func(output *localPCM)
+	switchMu   sync.Mutex
+	transition chan struct{}
+	open       func(id string, f format) (nativeOutput, error)
+	onDevice   func(output *localPCM)
 
 	mu       sync.Mutex
 	selected string
@@ -56,21 +60,34 @@ func (d *nativeDevice) close() {
 	}
 }
 
-// selectSource closes the device if another source held it.
-func (r *nativeRouter) selectSource(id string) {
+// selectSourceWithCue closes the device if another source held it.
+func (r *nativeRouter) selectSourceWithCue(id string, sound bool) {
+	r.switchMu.Lock()
+	defer r.switchMu.Unlock()
 	r.mu.Lock()
-	var old *nativeDevice
-	if r.selected != id {
-		r.selected = id
-		if r.owner != id {
-			old, r.device, r.owner = r.device, nil, ""
-		}
+	if r.selected == id {
+		r.mu.Unlock()
+		return
 	}
+	cue := sound && r.selected != "" && id != ""
+	f := r.format
+	old := r.device
+	done := make(chan struct{})
+	r.transition = done
+	r.selected = id
+	r.device = nil
+	r.owner = ""
 	r.mu.Unlock()
+	defer func() { r.mu.Lock(); r.transition = nil; close(done); r.mu.Unlock() }()
 	if old != nil {
 		old.close()
-		metricDeviceRate.Set(0)
+		outputRate("", 0)
 		r.reportDevice(nil)
+	}
+	if cue {
+		if err := r.playTransitionSound(f); err != nil {
+			slog.Warn("transition sound unavailable", "err", err)
+		}
 	}
 }
 
@@ -90,6 +107,12 @@ func (r *nativeRouter) reportDevice(output *localPCM) {
 // owner or format changes. It returns errNotRouted otherwise.
 func (r *nativeRouter) write(id string, f format, samples []int32) error {
 	r.mu.Lock()
+	for r.transition != nil && r.selected == id {
+		done := r.transition
+		r.mu.Unlock()
+		<-done
+		r.mu.Lock()
+	}
 	if r.selected != id {
 		r.mu.Unlock()
 		return errNotRouted
@@ -117,8 +140,10 @@ func (r *nativeRouter) write(id string, f format, samples []int32) error {
 		}
 		r.device, r.owner, r.format = device, id, f
 		r.mu.Unlock()
-		metricDeviceOpens.WithLabelValues(id).Inc()
-		metricDeviceRate.Set(float64(f.rate))
+		if metricsEnabled {
+			metricOpens.WithLabelValues(audio(stageOutput, id)...).Inc()
+		}
+		outputRate(id, f.rate)
 		pcm := output.Format()
 		r.reportDevice(&pcm)
 	}
@@ -147,7 +172,7 @@ func (r *nativeRouter) release(id string, drain bool) error {
 	}
 	device.mu.Unlock()
 	device.close()
-	metricDeviceRate.Set(0)
+	outputRate("", 0)
 	r.reportDevice(nil)
 	return err
 }
@@ -249,22 +274,46 @@ func (o *routedOutput) Format() localPCM {
 	return localPCM{Format: "S32_LE", Rate: o.f.rate, Channels: o.f.channels}
 }
 
-// startNativeSources runs arbitration for the native engine and, when configured,
+// BufferFrames is the device buffer while this output holds the device, else zero.
+func (o *routedOutput) BufferFrames() int {
+	_, capacity := o.router.deviceFill(o.id)
+	return capacity
+}
+
+// startNativeSources routes playback and, when configured,
 // the trusted-LAN Pulse receiver.
-func (c *controller) startNativeSources(ctx context.Context, pulseListen, esoundListen string, pulseBufferMS, esoundBufferMS, esoundSocketMS int, upnpListen, sinkName string) error {
-	backend, ok := c.backend.(*nativeBackend)
-	if !ok {
-		return errors.New("native sources require the native backend")
-	}
-	open, openLive := backend.open, backend.openLive
+func (c *controller) startNativeSources(ctx context.Context, backend *nativeBackend, pulseListen, esoundListen string, pulseBufferMS, esoundBufferMS, esoundSocketMS int, upnpListen, sinkName string, rtpConfig *rtp.Config) error {
+	deep, live := backend.open, backend.openLive
 	router := &nativeRouter{onDevice: c.local.nativeDevice, open: func(id string, f format) (nativeOutput, error) {
+		open := live
 		if id == "slopify" {
-			return open(f) // Local files can afford a deep buffer.
+			open = deep // Local files can afford a deep buffer.
 		}
-		return openLive(f)
+		output, err := open(f)
+		if a, ok := output.(*alsaOutput); ok {
+			a.id = id
+		}
+		return output, err
 	}}
 	backend.open = func(f format) (nativeOutput, error) { return &routedOutput{router: router, id: "slopify", f: f}, nil }
+	backend.pauseCue = router.playPauseSound
+	backend.startCue = func(f format) error { return router.playControlSound(f, transitionSound) }
+	// The transition sounds setting covers pause, seek and stall sounds too.
+	backend.cues = func() bool {
+		sources := c.local.nativeSources
+		if sources == nil {
+			return true
+		}
+		sources.mu.Lock()
+		defer sources.mu.Unlock()
+		return sources.TransitionSounds
+	}
 	lan := &nativeLAN{c: c, router: router, consumers: map[string]*nativeConsumer{}}
+	c.nativeLAN = lan
+	c.remoteCommands = make(chan remoteCommand, 1)
+	go c.runRemoteCommands(ctx)
+	c.senderVolumes = make(chan senderVolumeRequest, 1)
+	go c.runSenderVolumes(ctx)
 	s := c.sources
 	s.mu.Lock()
 	router.selected = s.Selected
@@ -275,13 +324,15 @@ func (c *controller) startNativeSources(ctx context.Context, pulseListen, esound
 		if err != nil {
 			return err
 		}
-		server := pulse.NewServer(pulse.Config{Name: sinkName, Description: c.name, MinBufferMillis: pulseBufferMS,
+		server := pulse.NewServer(pulse.Config{Name: sinkName, Description: c.name + " via PulseAudio", MinBufferMillis: pulseBufferMS,
 			OnStream: func(stream *pulse.Stream) { lan.addStream(pulseLive{stream}) }, OnVolume: lan.setVolume})
 		go func() {
 			if err := server.Serve(ctx, listener); err != nil {
 				slog.Error("pulse receiver", "err", err)
 			}
 		}()
+		advertise(ctx, "_pulse-sink._tcp", listener, []string{"device=" + sinkName, "description=" + c.name + " via PulseAudio", "format=s32le"},
+			func(collision int) string { return collisionName(c.name, collision) + " via PulseAudio" })
 		slog.Info("pulse receiver listening", "address", pulseListen, "sink", sinkName)
 	}
 	if esoundListen != "" {
@@ -310,7 +361,33 @@ func (c *controller) startNativeSources(ctx context.Context, pulseListen, esound
 		}()
 		slog.Info("upnp renderer listening", "address", listener.Addr().String())
 	}
+	if rtpConfig != nil {
+		rtpConfig.Name = c.name
+		rtpConfig.Control = c.link.controlPacket
+		rtpConfig.OnControl = c.link.receiveControl
+		rtpConfig.OnStream = func(stream *rtp.Stream) bool { return lan.addStream(rtpLive{stream}) }
+		go retryRTPReceiver(ctx, rtp.NewReceiver(*rtpConfig).Start, time.Second)
+	}
 	return nil
+}
+
+// retryRTPReceiver starts the receiver once the network allows it. Joining a
+// multicast group fails until an interface is up, which at boot can be after
+// the player starts, and that must not cost the player its other sources.
+func retryRTPReceiver(ctx context.Context, start func(context.Context) error, delay time.Duration) {
+	for ctx.Err() == nil {
+		err := start(ctx)
+		if err == nil {
+			slog.Info("rtp receiver listening for announcements")
+			return
+		}
+		slog.Warn("rtp receiver unavailable", "err", err, "retry", delay)
+		select {
+		case <-ctx.Done():
+		case <-time.After(delay):
+		}
+		delay = min(delay*2, 30*time.Second)
+	}
 }
 
 // nativeLAN tracks the sender streams behind the source cards.
@@ -350,11 +427,26 @@ func senderKey(props map[string]string, ip string) (key, name, host string) {
 	return hex.EncodeToString(sum[:]), name, host
 }
 
+// RTP session identity is source IP plus group, independent of display name,
+// port and SSRC. A same-group collision between devices must never merge cards.
+func liveSenderKey(stream liveStream) (key, name, host string) {
+	switch s := stream.(type) {
+	case rtpLive:
+		sum := sha256.Sum256([]byte("rtp:" + s.Peer() + ":" + s.Group.String()))
+		return hex.EncodeToString(sum[:]), s.Name + " · " + s.Group.String(), ""
+	case raopLive:
+		// Its own namespace: a laptop sending Pulse and AirPlay as "PipeWire" keeps two cards.
+		sum := sha256.Sum256([]byte("airplay:" + s.Peer() + ":" + s.Name))
+		return hex.EncodeToString(sum[:]), s.Name, ""
+	}
+	return senderKey(stream.Props(), stream.Peer())
+}
+
 // addStream admits a sender's stream; its newest session replaces an older one.
 // It reports whether a source slot was free.
 func (l *nativeLAN) addStream(stream liveStream) bool {
 	props := stream.Props()
-	key, name, host := senderKey(props, stream.Peer())
+	key, name, host := liveSenderKey(stream)
 	s := l.c.sources
 	s.mu.Lock()
 	var source *speakerSource
@@ -369,7 +461,7 @@ func (l *nativeLAN) addStream(stream liveStream) bool {
 		for _, p := range s.Sources {
 			used[p.ID] = true
 		}
-		for i := 1; i <= 7 && source == nil; i++ {
+		for i := 1; i <= maxLANSources && source == nil; i++ {
 			if id := fmt.Sprintf("lan_%d", i); !used[id] {
 				source = &speakerSource{ID: id, Key: key, meter: audiometer.New()}
 				s.Sources = append(s.Sources, source)
@@ -380,7 +472,7 @@ func (l *nativeLAN) addStream(stream liveStream) bool {
 	if source == nil {
 		s.Error = "Remembered source limit reached; new sources are blocked"
 		s.mu.Unlock()
-		slog.Warn("pulse sender rejected: no free source slot", "peer", stream.Peer())
+		slog.Warn("sender rejected: no free source slot", "protocol", stream.Protocol(), "peer", stream.Peer())
 		return false
 	}
 	if source.meter == nil {
@@ -388,6 +480,10 @@ func (l *nativeLAN) addStream(stream liveStream) bool {
 	}
 	source.Name, source.Host, source.IP = name, host, stream.Peer()
 	source.Protocol = stream.Protocol()
+	if rtpStream, ok := stream.(rtpLive); ok {
+		source.RTPGroup = netip.AddrPortFrom(rtpStream.Group, rtpStream.Port).String()
+		source.RTPInstance = rtpStream.Metadata().Instance
+	}
 	source.Connected, source.LastSeen = true, time.Now()
 	source.Format = stream.PCM().local()
 	source.Metadata = sourceMetadata(props)
@@ -423,8 +519,23 @@ func (l *nativeLAN) consume(ctx context.Context, consumer *nativeConsumer) {
 	stream, id := consumer.stream, consumer.id
 	pcm := stream.PCM()
 	defer stream.Close()
-	stream.ObserveReceive(func(gap time.Duration) { metricReceiveGap.WithLabelValues(id).Observe(millis(gap)) })
-	var lastUnderflows, lastOverflows, lastClipped uint64
+	group := ""
+	if rtpStream, ok := stream.(rtpLive); ok {
+		group = rtpStream.Group.String()
+	}
+	noteSource(id, stream.Protocol(), stream.Peer(), group)
+	input := audio(stageInput, id)
+	if metricsEnabled {
+		metricRate.WithLabelValues(input...).Set(float64(pcm.rate))
+		defer metricRate.DeleteLabelValues(input...)
+	}
+	if metricsEnabled {
+		stream.ObserveReceive(func(gap time.Duration) {
+			metricReceiveGap.WithLabelValues(audio(stageInput, id)...).Observe(gap.Seconds())
+			metricPackets.WithLabelValues(audio(stageInput, id)...).Inc()
+		})
+	}
+	var lastUnderflows, lastOverflows, lastClipped, lastLost uint64
 	lastPass := time.Now()
 	defer func() {
 		consumer.cancel()
@@ -445,11 +556,16 @@ func (l *nativeLAN) consume(ctx context.Context, consumer *nativeConsumer) {
 		}
 		l.c.sources.mu.Unlock()
 	}()
-	frames := pcm.rate * int(nativeSourcePeriod) / int(time.Second)
+	frames := nativeSourceFrames(pcm.rate)
 	raw := make([]byte, frames*pcm.channels*pcm.bytes)
 	samples := make([]int32, frames*pcm.channels)
 	f := format{rate: pcm.rate, channels: pcm.channels, bits: pcm.bits}
-	peaks := nativePeaks{report: func(v float64, at time.Time) { l.c.local.nativePeak(id, v, at) }}
+	peaks := nativePeaks{report: func(v uint32, at time.Time) {
+		l.c.local.nativePeak(id, v, at)
+		if l.c.link.source() == id {
+			l.c.local.nativePeakFrom("slopify", id, v, at)
+		}
+	}}
 	var next time.Time
 	var fill nativeFillPacer
 	lastAudio := time.Now()
@@ -461,15 +577,19 @@ func (l *nativeLAN) consume(ctx context.Context, consumer *nativeConsumer) {
 		}
 		n := stream.Read(raw)
 		stats := stream.Stats()
-		metricUnderflows.WithLabelValues(id).Add(float64(stats.Underflows - lastUnderflows))
-		metricOverflows.WithLabelValues(id).Add(float64(stats.Overflows - lastOverflows))
-		metricClipped.WithLabelValues(id).Add(float64(stats.Clipped - lastClipped))
-		lastUnderflows, lastOverflows, lastClipped = stats.Underflows, stats.Overflows, stats.Clipped
+		if metricsEnabled {
+			metricUnderruns.WithLabelValues(input...).Add(float64(stats.Underflows - lastUnderflows))
+			metricOverflows.WithLabelValues(input...).Add(float64(stats.Overflows - lastOverflows))
+			metricClipped.WithLabelValues(input...).Add(float64(stats.Clipped - lastClipped))
+			metricLostFrames.WithLabelValues(input...).Add(float64(stats.Lost - lastLost))
+		}
+		lastUnderflows, lastOverflows, lastClipped, lastLost = stats.Underflows, stats.Overflows, stats.Clipped, stats.Lost
 		passAt := time.Now()
-		metricLoopGap.WithLabelValues(id).Observe(millis(passAt.Sub(lastPass)))
+		if metricsEnabled {
+			metricLoopGap.WithLabelValues(audio(stageOutput, id)...).Observe(passAt.Sub(lastPass).Seconds())
+		}
 		lastPass = passAt
 		if n == 0 {
-			metricEmptyReads.WithLabelValues(id).Inc()
 			if time.Since(lastAudio) > nativeSourceIdle {
 				l.router.release(id, false) // A silent tunnel does not hold the DAC.
 			}
@@ -484,16 +604,25 @@ func (l *nativeLAN) consume(ctx context.Context, consumer *nativeConsumer) {
 			continue
 		}
 		lastAudio = time.Now()
+		if metricsEnabled {
+			metricBytes.WithLabelValues(input...).Add(float64(n))
+		}
 		count := stream.Decode(samples, raw[:n])
-		metricStreamBuffer.WithLabelValues(id).Observe(float64(stats.BufferedUsec) / 1000)
+		if metricsEnabled {
+			metricBuffer.WithLabelValues(input...).Observe(float64(stats.BufferedUsec) / 1e6)
+		}
 		writeAt := time.Now()
 		err := l.router.write(id, f, samples[:count])
 		delay := time.Duration(0)
 		switch {
 		case err == nil:
-			metricWriteTime.WithLabelValues(id).Observe(millis(time.Since(writeAt)))
+			if metricsEnabled {
+				metricWriteTime.WithLabelValues(audio(stageOutput, id)...).Observe(time.Since(writeAt).Seconds())
+			}
 			delay = time.Duration(l.router.delay(id)) * time.Second / time.Duration(pcm.rate)
-			metricDeviceDelay.WithLabelValues(id).Observe(millis(delay))
+			if metricsEnabled {
+				metricBuffer.WithLabelValues(audio(stageOutput, id)...).Observe(delay.Seconds())
+			}
 			stream.SetDeviceDelay(uint64(delay / time.Microsecond))
 			next = fill.wait(next, count/pcm.channels, pcm.rate, delay, time.Now())
 		case errors.Is(err, errNotRouted):
@@ -501,7 +630,7 @@ func (l *nativeLAN) consume(ctx context.Context, consumer *nativeConsumer) {
 			stream.SetDeviceDelay(0)
 			next = nativePace(next, count/pcm.channels, pcm.rate)
 		default:
-			metricOutputErrors.WithLabelValues(id).Inc()
+			errorAt(stageOutput, id, "write")
 			slog.Warn("pulse sender output", "source", id, "err", err)
 			next = nativePace(next, count/pcm.channels, pcm.rate)
 		}
@@ -512,28 +641,8 @@ func (l *nativeLAN) consume(ctx context.Context, consumer *nativeConsumer) {
 // setVolume maps a selected sender's volume to the hardware's configured range.
 // Samples are never scaled: this is the same control as the knob.
 func (l *nativeLAN) setVolume(stream *pulse.Stream, pulseVolume uint32) {
-	mixer := l.c.mixer
-	if mixer == nil {
-		return
-	}
 	key, _, _ := senderKey(stream.Props(), stream.Peer)
-	s := l.c.sources
-	s.mu.Lock()
-	selected := false
-	if p := s.source(s.Selected); p != nil {
-		selected = p.Key == key
-	}
-	s.mu.Unlock()
-	if !selected {
-		return
-	}
-	control := mixer.snapshot()
-	level := senderLevel(pulseVolume, control)
-	if err := mixer.setLevel(context.Background(), level); err != nil {
-		slog.Warn("sender volume", "err", err)
-		return
-	}
-	l.c.reportVolume(context.Background())
+	l.c.requestSenderVolume(key, pulseSenderLevel(pulseVolume))
 }
 
 // bufferStatus reads a source's queues for display. The lock order is sources,
@@ -554,7 +663,14 @@ func (l *nativeLAN) bufferStatus(p *speakerSource) *sourceBuffer {
 	consumer := l.consumers[p.Key]
 	l.mu.Unlock()
 	if consumer != nil {
+		if stream, ok := consumer.stream.(rtpLive); ok {
+			p.RTPInstance = stream.Metadata().Instance
+			p.RTPGroup = netip.AddrPortFrom(stream.Group, stream.Port).String()
+		}
 		p.Metadata = sourceMetadata(consumer.stream.Props()) // Senders retitle tracks.
+		if stream, ok := consumer.stream.(remoteSource); ok {
+			p.Remote = stream.Controllable()
+		}
 		stats := consumer.stream.Stats()
 		buffer.StreamMS, buffer.StreamMaxMS = int(stats.BufferedUsec/1000), int(stats.TargetUsec/1000)
 		buffer.Underflows = stats.Underflows
@@ -584,7 +700,7 @@ func senderVolume(level int, c volume.Control) uint32 {
 // A sender already at this level is left alone, so a drag never fights its own echo.
 func (l *nativeLAN) syncSelectedSenderVolume(selectedKey string) {
 	mixer := l.c.mixer
-	if mixer == nil || selectedKey == "" {
+	if mixer == nil || selectedKey == "" || l.c.senderVolumeRecent() {
 		return
 	}
 	l.mu.Lock()
@@ -615,8 +731,12 @@ func (l *nativeLAN) arbitrate(ctx context.Context) {
 		playback := l.c.local.playback.State
 		l.c.local.mu.Unlock()
 		now := time.Now()
+		followSource := l.c.link.source()
+		unavailable := l.c.link.unavailableSenders(now)
 		s.mu.Lock()
 		for _, p := range s.Sources {
+			p.QueueInput = p.ID == followSource && s.Selected == "slopify"
+			p.SenderUnavailable = p.Protocol == "rtp" && unavailable[p.IP]
 			if p.ID == "slopify" && l.c.server != "" {
 				p.Connected = true
 				updateSourceStartup(p, playback, now)
@@ -630,8 +750,22 @@ func (l *nativeLAN) arbitrate(ctx context.Context) {
 			p.Active = l.router.owns(p.ID)
 			p.Buffer = l.bufferStatus(p)
 		}
+		// The logical source stays Slopify. Mirror its multicast input's live
+		// signal so automatic routing and the UI retain the queue's identity.
+		if input := s.source(followSource); input != nil && followSource != "" {
+			if queue := s.source("slopify"); queue != nil {
+				queue.Starting = false
+				queue.State = "running"
+				queue.Format, queue.Buffer = input.Format, input.Buffer
+				queue.Sounding, queue.SignalAt = input.Sounding, input.SignalAt
+				queue.AudibleSince, queue.LastAudible = input.AudibleSince, input.LastAudible
+				queue.LastSound = input.LastSound
+				queue.Active = input.Active
+			}
+		}
 		s.chooseSource(now)
 		selected := s.Selected
+		transitionSounds := s.TransitionSounds
 		selectedKey := ""
 		if p := s.source(selected); p != nil && p.ID != "slopify" {
 			selectedKey = p.Key
@@ -641,16 +775,48 @@ func (l *nativeLAN) arbitrate(ctx context.Context) {
 			if p.ID == selected {
 				value = 1
 			}
-			metricSelected.WithLabelValues(p.ID).Set(value)
+			if p.Protocol != "" {
+				noteSource(p.ID, p.Protocol, p.IP, p.RTPGroup)
+			}
+			i := identityOf(p.ID)
+			if metricsEnabled {
+				metricSelected.WithLabelValues(i.transport, i.label).Set(value)
+			}
 		}
 		s.mu.Unlock()
-		if selected != previous {
+		logicalChanged := selected != previous
+		if logicalChanged {
 			if previous != "" {
-				metricSelectionChanges.Inc()
+				if metricsEnabled {
+					metricSelectionChanges.Inc()
+				}
 			}
 			previous = selected
 		}
-		l.router.selectSource(selected)
+		routed := selected
+		if selected == "slopify" && followSource != "" {
+			routed = followSource
+		}
+		if l.c.rtpSender != nil {
+			l.c.rtpSender.SetSourceEligible(multicastSourceEligible(selected, followSource))
+		}
+		l.router.selectSourceWithCue(routed, transitionSounds && logicalChanged)
 		l.syncSelectedSenderVolume(selectedKey)
 	}
+}
+
+// Only locally decoded queue audio may supply multicast. Future queue backends
+// can join this allowlist when they implement the sender path; LAN inputs cannot.
+func multicastSourceEligible(selected, upstream string) bool {
+	return multicastSources[selected] && upstream == ""
+}
+
+// multicastSources may be retransmitted over multicast: Slopify queue playback and,
+// once its backend exists and feeds the sender, Spotify. LAN inputs (Pulse, ESound,
+// UPnP, multicast, AirPlay, Chromecast) never are; they are not ours to rebroadcast.
+var multicastSources = map[string]bool{"slopify": true, "spotify": true}
+
+// Multiply in 64 bits: rate * nanoseconds overflows an int on 32-bit ARM.
+func nativeSourceFrames(rate int) int {
+	return int(int64(rate) * int64(nativeSourcePeriod) / int64(time.Second))
 }

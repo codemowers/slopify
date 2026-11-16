@@ -23,6 +23,7 @@
 
   <div id="reconnect-status" role="status" hidden>Reconnecting to Slopify…</div>
   <div id="blocked" hidden>This browser was asked to play. <button id="unblock">Allow audio here</button></div>
+  <div id="inactive-tab" hidden>This browser plays in another tab. <button id="use-here">Use here</button></div>
 
   <button id="menu-backdrop" class="menu-backdrop" aria-label="Close menu" hidden></button>
   <aside id="settings-panel" class="settings-panel" aria-label="Menu and settings" hidden>
@@ -62,8 +63,9 @@
         <button data-theme-choice="dark">Dark</button>
       </div>
       <label class="nerd-setting"><input id="nerd-toggle" type="checkbox"> Nerd mode <span>Playback, buffer and stream details</span></label>
-      <p>Your queue follows your account across devices.</p>
+      <p id="queue-identity">Your queue follows your account across devices.</p>
     </section>
+    <p id="demo-music-credits" hidden><a href="/demo-music.html" target="_blank" rel="noopener noreferrer">Demo music · artists and licenses</a></p>
     <form method="post" action="/auth/logout" class="user">
       <span id="user"></span>
       <button type="submit">Sign out</button>
@@ -105,6 +107,7 @@
             <button id="clear" title="Remove queued items; keep the current item playing">Clear queue</button>
           </div>
         </div>
+        <p id="pause-source" hidden></p>
         <p id="hero-artist">Find something you love in your library.</p>
       </div>
       <div class="table-wrap">

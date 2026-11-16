@@ -9,8 +9,6 @@ import (
 	"mime"
 	"strconv"
 	"strings"
-
-	"github.com/mewkiz/flac"
 )
 
 const streamEnd = int64(1) << 62
@@ -28,11 +26,7 @@ func OpenStream(r io.Reader, contentType string) (Decoder, error) {
 	}
 	switch {
 	case string(magic[:4]) == "fLaC":
-		stream, err := flac.New(buffered)
-		if err != nil {
-			return nil, fmt.Errorf("flac: %w", err)
-		}
-		return newFLACDecoder(stream)
+		return openFLACStream(buffered)
 	case (string(magic[:4]) == "RIFF" || string(magic[:4]) == "RF64") && string(magic[8:12]) == "WAVE":
 		return openWAV(&forwardSeeker{r: buffered})
 	}

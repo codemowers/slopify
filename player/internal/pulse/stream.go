@@ -2,6 +2,7 @@ package pulse
 
 import (
 	"encoding/binary"
+	"github.com/codemowers/slopify/player/internal/pcmring"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -40,7 +41,6 @@ type Stream struct {
 	corked    bool
 	prebuf    bool
 	started   bool
-	underrun  bool
 	drainTag  *uint32
 	closed    bool
 	done      chan struct{}
@@ -104,13 +104,6 @@ func (s *Stream) inputInfo(w *writer, version uint32) *writer {
 	return w
 }
 
-// Stats describes a stream's buffering for display.
-type Stats struct {
-	BufferedUsec, TargetUsec uint64
-	Underflows, Overflows    uint64
-	Clipped                  uint64
-}
-
 // ObserveReceive reports the time between blocks arriving from the sender.
 func (s *Stream) ObserveReceive(observe func(gap time.Duration)) {
 	s.mu.Lock()
@@ -132,11 +125,11 @@ func (s *Stream) Decode(dst []int32, raw []byte) int {
 	return n
 }
 
-func (s *Stream) Stats() Stats {
+func (s *Stream) Stats() pcmring.Stats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	frame, rate := uint64(s.frameSize()), uint64(s.Rate)
-	return Stats{BufferedUsec: uint64(s.len) / frame * 1_000_000 / rate,
+	return pcmring.Stats{BufferedUsec: uint64(s.len) / frame * 1_000_000 / rate,
 		TargetUsec: uint64(s.attr.tLength) / frame * 1_000_000 / rate, Underflows: s.underflows, Overflows: s.overflows, Clipped: s.clipped.Load()}
 }
 
@@ -399,13 +392,6 @@ func (s *Stream) setCorked(corked bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.corked = corked
-}
-
-// Corked reports whether the sender has paused this stream.
-func (s *Stream) Corked() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.corked
 }
 
 func (s *Stream) latencyUsec() uint64 {

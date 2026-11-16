@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -15,33 +16,53 @@ import (
 	"github.com/codemowers/slopify/player/internal/audiometer"
 )
 
+const maxLANSources = 30
+const sourceSettingsMaxBytes = 64 << 10
+
 type speakerSource struct {
-	Paused       bool              `json:"paused,omitempty"`
-	Playing      bool              `json:"playing,omitempty"`
-	Buffer       *sourceBuffer     `json:"buffer,omitempty"`
-	ReadyAt      time.Time         `json:"-"`
-	Starting     bool              `json:"starting,omitempty"`
-	AudibleSince time.Time         `json:"-"`
-	SignalAt     time.Time         `json:"-"`
-	Metadata     map[string]string `json:"metadata,omitempty"`
-	LastSeen     time.Time         `json:"-"`
-	ID           string            `json:"id"`
-	Key          string            `json:"key,omitempty"`
-	Name         string            `json:"name"`
-	Protocol     string            `json:"protocol,omitempty"`
-	IP           string            `json:"ip,omitempty"`
-	Host         string            `json:"host,omitempty"`
-	Title        string            `json:"title,omitempty"`
-	Format       *localPCM         `json:"format,omitempty"`
-	State        string            `json:"state,omitempty"`
-	Connected    bool              `json:"connected"`
-	Active       bool              `json:"active"`
-	Level        audiometer.Window `json:"level"`
-	LastSound    time.Time         `json:"-"`
-	Sounding     bool              `json:"-"`
-	LastAudible  time.Time         `json:"-"`
-	meter        *audiometer.Meter
-	history      []audiometer.Window
+	Input             *sourceInput        `json:"input,omitempty"`
+	Detached          bool                `json:"detached,omitempty"`
+	SenderUnavailable bool                `json:"senderUnavailable,omitempty"`
+	QueueInput        bool                `json:"-"`
+	RTPInstance       string              `json:"-"`
+	RTPGroup          string              `json:"rtpGroup,omitempty"`
+	Paused            bool                `json:"paused,omitempty"`
+	Remote            bool                `json:"remote,omitempty"` // The sender accepts transport commands.
+	Playing           bool                `json:"playing,omitempty"`
+	Buffer            *sourceBuffer       `json:"buffer,omitempty"`
+	ReadyAt           time.Time           `json:"-"`
+	Starting          bool                `json:"starting,omitempty"`
+	AudibleSince      time.Time           `json:"-"`
+	SignalAt          time.Time           `json:"-"`
+	Metadata          map[string]string   `json:"metadata,omitempty"`
+	LastSeen          time.Time           `json:"-"`
+	ID                string              `json:"id"`
+	Key               string              `json:"key,omitempty"`
+	Name              string              `json:"name"`
+	Protocol          string              `json:"protocol,omitempty"`
+	IP                string              `json:"ip,omitempty"`
+	Host              string              `json:"host,omitempty"`
+	Title             string              `json:"title,omitempty"`
+	Format            *localPCM           `json:"format,omitempty"`
+	State             string              `json:"state,omitempty"`
+	Connected         bool                `json:"connected"`
+	Active            bool                `json:"active"`
+	Level             audiometer.Window   `json:"level"`
+	Windows           []audiometer.Window `json:"windows,omitempty"`
+	WindowsDelta      bool                `json:"windowsDelta,omitempty"`
+	LastSound         time.Time           `json:"-"`
+	Sounding          bool                `json:"-"`
+	LastAudible       time.Time           `json:"-"`
+	meter             *audiometer.Meter
+	history           []audiometer.Window
+}
+
+// Encoded input bytes and corresponding decoded audio frames, never PCM bytes
+// or network-download throughput. The browser computes bits per audio second.
+type sourceInput struct {
+	Bytes  uint64 `json:"bytes"`
+	Frames uint64 `json:"frames"`
+	Rate   int    `json:"rate"`
 }
 
 // sourceBuffer shows how full a source's queues are, for the speaker page.
@@ -58,19 +79,21 @@ type sourceOutputWindow struct {
 	audiometer.Window
 }
 type speakerSources struct {
-	resumeRevision    uint64
-	PrioritySilenceMS int                  `json:"prioritySilenceMs"`
-	AutoMode          string               `json:"autoMode"`
-	MinimumSoundMS    int                  `json:"minimumSoundMs"`
-	Output            []sourceOutputWindow `json:"output"`
-	mu                sync.Mutex
-	Mode              string           `json:"mode"`
-	Selected          string           `json:"selected"`
-	Sources           []*speakerSource `json:"sources"`
-	Revision          uint64           `json:"revision"`
-	Error             string           `json:"error,omitempty"`
-	Fixed             bool             `json:"fixed,omitempty"`
-	file              string
+	PriorityTakeoverMS int  `json:"priorityTakeoverMs"`
+	TransitionSounds   bool `json:"transitionSounds"`
+	resumeRevision     uint64
+	PrioritySilenceMS  int                  `json:"prioritySilenceMs"`
+	AutoMode           string               `json:"autoMode"`
+	MinimumSoundMS     int                  `json:"minimumSoundMs"`
+	Output             []sourceOutputWindow `json:"output"`
+	mu                 sync.Mutex
+	Mode               string           `json:"mode"`
+	Selected           string           `json:"selected"`
+	Sources            []*speakerSource `json:"sources"`
+	Revision           uint64           `json:"revision"`
+	Error              string           `json:"error,omitempty"`
+	Fixed              bool             `json:"fixed,omitempty"`
+	file               string
 }
 
 func readSourceSettings(path string) ([]byte, error) {
@@ -79,15 +102,15 @@ func readSourceSettings(path string) ([]byte, error) {
 		return nil, err
 	}
 	defer file.Close()
-	return io.ReadAll(io.LimitReader(file, 16385))
+	return io.ReadAll(io.LimitReader(file, sourceSettingsMaxBytes+1))
 }
 
 func newSpeakerSources(file string) *speakerSources {
-	s := &speakerSources{PrioritySilenceMS: 30000, AutoMode: "recent", MinimumSoundMS: 500, Mode: "off", Selected: "slopify", Revision: 1, file: file}
+	s := &speakerSources{TransitionSounds: true, PrioritySilenceMS: 30000, AutoMode: "recent", MinimumSoundMS: 500, Mode: "off", Selected: "slopify", Revision: 1, file: file}
 	if file != "" {
-		if data, err := readSourceSettings(file); err == nil && len(data) <= 16384 {
-			saved := speakerSources{MinimumSoundMS: 500, PrioritySilenceMS: 30000}
-			if json.Unmarshal(data, &saved) == nil && validSourceMode(saved.Mode) && saved.MinimumSoundMS >= 0 && saved.MinimumSoundMS <= 2000 && saved.PrioritySilenceMS >= 0 && saved.PrioritySilenceMS <= 120000 && len(saved.Sources) <= 8 {
+		if data, err := readSourceSettings(file); err == nil && len(data) <= sourceSettingsMaxBytes {
+			saved := speakerSources{TransitionSounds: true, MinimumSoundMS: 500, PrioritySilenceMS: 30000}
+			if json.Unmarshal(data, &saved) == nil && validSourceMode(saved.Mode) && saved.MinimumSoundMS >= 0 && saved.MinimumSoundMS <= 2000 && saved.PrioritySilenceMS >= 0 && saved.PrioritySilenceMS <= 120000 && saved.PriorityTakeoverMS >= 0 && saved.PriorityTakeoverMS <= 10000 && len(saved.Sources) <= maxLANSources+1 {
 				seen := map[string]bool{}
 				valid := true
 				for _, source := range saved.Sources {
@@ -103,6 +126,8 @@ func newSpeakerSources(file string) *speakerSources {
 					} else if saved.Mode == "priority" {
 						s.AutoMode = "priority"
 					}
+					s.PriorityTakeoverMS = saved.PriorityTakeoverMS
+					s.TransitionSounds = saved.TransitionSounds
 					s.PrioritySilenceMS = saved.PrioritySilenceMS
 					s.MinimumSoundMS = saved.MinimumSoundMS
 					s.Mode = saved.Mode
@@ -121,13 +146,18 @@ func newSpeakerSources(file string) *speakerSources {
 	}
 	for _, source := range s.Sources {
 		source.Connected = false
+		source.SenderUnavailable = false
 		source.Active = false
 		source.meter = audiometer.New()
 	}
 	return s
 }
 func validSourceID(id string) bool {
-	return id == "slopify" || len(id) == 5 && strings.HasPrefix(id, "lan_") && id[4] >= '1' && id[4] <= '7'
+	if id == "slopify" {
+		return true
+	}
+	n, err := strconv.Atoi(strings.TrimPrefix(id, "lan_"))
+	return err == nil && n >= 1 && n <= maxLANSources && id == "lan_"+strconv.Itoa(n)
 }
 
 // withoutServer leaves no way to play Slopify, so a pin on it must not keep LAN
@@ -149,13 +179,15 @@ func (s *speakerSources) save() {
 	// node IDs or credentials. Atomic rename preserves the previous good state.
 	type peer struct{ ID, Key, Name, IP, Host, Protocol string }
 	saved := struct {
-		PrioritySilenceMS int    `json:"prioritySilenceMs"`
-		AutoMode          string `json:"autoMode"`
-		MinimumSoundMS    int    `json:"minimumSoundMs"`
-		Mode              string `json:"mode"`
-		Selected          string `json:"selected"`
-		Sources           []peer `json:"sources"`
-	}{PrioritySilenceMS: s.PrioritySilenceMS, AutoMode: s.AutoMode, MinimumSoundMS: s.MinimumSoundMS, Mode: s.Mode, Selected: s.Selected}
+		PriorityTakeoverMS int    `json:"priorityTakeoverMs"`
+		TransitionSounds   bool   `json:"transitionSounds"`
+		PrioritySilenceMS  int    `json:"prioritySilenceMs"`
+		AutoMode           string `json:"autoMode"`
+		MinimumSoundMS     int    `json:"minimumSoundMs"`
+		Mode               string `json:"mode"`
+		Selected           string `json:"selected"`
+		Sources            []peer `json:"sources"`
+	}{PriorityTakeoverMS: s.PriorityTakeoverMS, TransitionSounds: s.TransitionSounds, PrioritySilenceMS: s.PrioritySilenceMS, AutoMode: s.AutoMode, MinimumSoundMS: s.MinimumSoundMS, Mode: s.Mode, Selected: s.Selected}
 	for _, p := range s.Sources {
 		saved.Sources = append(saved.Sources, peer{p.ID, p.Key, p.Name, p.IP, p.Host, p.Protocol})
 	}
@@ -204,8 +236,11 @@ func (s *speakerSources) pendingFallback(now time.Time) *sourceFallback {
 		return nil
 	}
 	for i, p := range s.Sources {
+		if p.QueueInput || p.SenderUnavailable {
+			continue
+		}
 		sounding := !p.Paused && p.Connected && p.Sounding && !p.AudibleSince.IsZero() && now.Sub(p.SignalAt) <= time.Second
-		if !sounding {
+		if !sounding || !s.priorityReady(p, i, currentIndex, now) {
 			continue
 		}
 		if i < currentIndex {
@@ -218,27 +253,78 @@ func (s *speakerSources) pendingFallback(now time.Time) *sourceFallback {
 	return nil
 }
 
-func (s *speakerSources) snapshot() any {
+// A cursor belongs to one SSE connection. Match identity rather than time order:
+// clock correction and switching between meters can reset timestamps/sequences.
+type outputHistoryCursor struct {
+	last    sourceOutputWindow
+	valid   bool
+	sources map[string]audiometer.Window
+}
+
+func (s *speakerSources) snapshot(history ...*outputHistoryCursor) any {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	result := struct {
-		Fallback          *sourceFallback      `json:"fallback,omitempty"`
-		PrioritySilenceMS int                  `json:"prioritySilenceMs"`
-		AutoMode          string               `json:"autoMode"`
-		MinimumSoundMS    int                  `json:"minimumSoundMs"`
-		Mode              string               `json:"mode"`
-		Selected          string               `json:"selected"`
-		Sources           []speakerSource      `json:"sources"`
-		Revision          uint64               `json:"revision"`
-		Error             string               `json:"error,omitempty"`
-		Output            []sourceOutputWindow `json:"output"`
-		Fixed             bool                 `json:"fixed,omitempty"`
-	}{Fixed: s.Fixed, Fallback: s.pendingFallback(time.Now()), PrioritySilenceMS: s.PrioritySilenceMS, AutoMode: s.AutoMode, MinimumSoundMS: s.MinimumSoundMS, Mode: s.Mode, Selected: s.Selected, Revision: s.Revision, Error: s.Error, Output: append([]sourceOutputWindow(nil), s.Output...)}
+		PriorityTakeoverMS int                  `json:"priorityTakeoverMs"`
+		TransitionSounds   bool                 `json:"transitionSounds"`
+		Fallback           *sourceFallback      `json:"fallback,omitempty"`
+		PrioritySilenceMS  int                  `json:"prioritySilenceMs"`
+		AutoMode           string               `json:"autoMode"`
+		MinimumSoundMS     int                  `json:"minimumSoundMs"`
+		Mode               string               `json:"mode"`
+		Selected           string               `json:"selected"`
+		Sources            []speakerSource      `json:"sources"`
+		Revision           uint64               `json:"revision"`
+		Error              string               `json:"error,omitempty"`
+		Output             []sourceOutputWindow `json:"output"`
+		OutputDelta        bool                 `json:"outputDelta,omitempty"`
+		Fixed              bool                 `json:"fixed,omitempty"`
+	}{PriorityTakeoverMS: s.PriorityTakeoverMS, TransitionSounds: s.TransitionSounds, Fixed: s.Fixed, Fallback: s.pendingFallback(time.Now()), PrioritySilenceMS: s.PrioritySilenceMS, AutoMode: s.AutoMode, MinimumSoundMS: s.MinimumSoundMS, Mode: s.Mode, Selected: s.Selected, Revision: s.Revision, Error: s.Error, Output: append([]sourceOutputWindow(nil), s.Output...)}
+	if len(history) > 0 && history[0] != nil {
+		cursor := history[0]
+		if cursor.valid {
+			for i := len(result.Output) - 1; i >= 0; i-- {
+				w := result.Output[i]
+				if w.SourceID == cursor.last.SourceID && w.Sequence == cursor.last.Sequence && w.At.Equal(cursor.last.At) {
+					result.Output = result.Output[i+1:]
+					result.OutputDelta = true
+					break
+				}
+			}
+		}
+		if len(s.Output) > 0 {
+			cursor.last, cursor.valid = s.Output[len(s.Output)-1], true
+		} else {
+			cursor.valid = false
+		}
+	}
 	for _, p := range s.Sources {
 		copy := *p
 		copy.Key = ""
 		if p.meter != nil {
 			copy.Level = p.meter.Snapshot()
+		}
+		if len(history) > 0 && history[0] != nil {
+			cursor := history[0]
+			if cursor.sources == nil {
+				cursor.sources = map[string]audiometer.Window{}
+			}
+			windows := p.history
+			if last, ok := cursor.sources[p.ID]; ok {
+				for i := len(windows) - 1; i >= 0; i-- {
+					if windows[i].Sequence == last.Sequence && windows[i].At.Equal(last.At) {
+						windows = windows[i+1:]
+						copy.WindowsDelta = true
+						break
+					}
+				}
+			}
+			copy.Windows = append([]audiometer.Window(nil), windows...)
+			if len(p.history) > 0 {
+				cursor.sources[p.ID] = p.history[len(p.history)-1]
+			} else {
+				delete(cursor.sources, p.ID)
+			}
 		}
 		result.Sources = append(result.Sources, copy)
 	}
@@ -246,16 +332,18 @@ func (s *speakerSources) snapshot() any {
 }
 func (c *controller) localSourceCommand(w http.ResponseWriter, r *http.Request) {
 	var cmd struct {
-		PrioritySilenceMS *int     `json:"prioritySilenceMs"`
-		SwitchNow         bool     `json:"switchNow"`
-		Unpin             bool     `json:"unpin"`
-		AutoMode          string   `json:"autoMode"`
-		MinimumSoundMS    *int     `json:"minimumSoundMs"`
-		Mode              string   `json:"mode"`
-		Selected          string   `json:"selected"`
-		Forget            string   `json:"forget"`
-		Order             []string `json:"order"`
-		Revision          uint64   `json:"revision"`
+		PriorityTakeoverMS *int     `json:"priorityTakeoverMs"`
+		TransitionSounds   *bool    `json:"transitionSounds"`
+		PrioritySilenceMS  *int     `json:"prioritySilenceMs"`
+		SwitchNow          bool     `json:"switchNow"`
+		Unpin              bool     `json:"unpin"`
+		AutoMode           string   `json:"autoMode"`
+		MinimumSoundMS     *int     `json:"minimumSoundMs"`
+		Mode               string   `json:"mode"`
+		Selected           string   `json:"selected"`
+		Forget             string   `json:"forget"`
+		Order              []string `json:"order"`
+		Revision           uint64   `json:"revision"`
 	}
 	if !localMutation(w, r, &cmd) {
 		return
@@ -276,7 +364,7 @@ func (c *controller) localSourceCommand(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if cmd.SwitchNow {
-		if cmd.Unpin || cmd.Selected != "" || cmd.Mode != "" || cmd.AutoMode != "" || cmd.Order != nil || cmd.MinimumSoundMS != nil || cmd.PrioritySilenceMS != nil {
+		if cmd.Unpin || cmd.Selected != "" || cmd.Mode != "" || cmd.AutoMode != "" || cmd.Order != nil || cmd.MinimumSoundMS != nil || cmd.PrioritySilenceMS != nil || cmd.PriorityTakeoverMS != nil || cmd.TransitionSounds != nil {
 			http.Error(w, "Switch now cannot be combined with policy changes", 400)
 			return
 		}
@@ -299,6 +387,10 @@ func (c *controller) localSourceCommand(w http.ResponseWriter, r *http.Request) 
 	}
 	if cmd.Unpin && cmd.Selected != "" {
 		http.Error(w, "Cannot unpin with this command", 400)
+		return
+	}
+	if cmd.PriorityTakeoverMS != nil && (*cmd.PriorityTakeoverMS < 0 || *cmd.PriorityTakeoverMS > 10000) {
+		http.Error(w, "Priority takeover delay must be 0–10000 ms", 400)
 		return
 	}
 	if cmd.PrioritySilenceMS != nil && (*cmd.PrioritySilenceMS < 0 || *cmd.PrioritySilenceMS > 120000) {
@@ -329,6 +421,10 @@ func (c *controller) localSourceCommand(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	if cmd.Selected != "" {
+		if target := s.source(cmd.Selected); target != nil && target.SenderUnavailable && cmd.Selected != s.Selected {
+			http.Error(w, "This player is receiving audio and is unavailable as a multicast sender", http.StatusConflict)
+			return
+		}
 		found := false
 		for _, p := range s.Sources {
 			found = found || p.ID == cmd.Selected
@@ -339,6 +435,16 @@ func (c *controller) localSourceCommand(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	if cmd.Order != nil {
+		// Receiver-only pages hide the dormant Slopify slot. Preserve that
+		// slot's position when the user reorders the visible LAN sources.
+		if c.server == "" && len(cmd.Order) == len(s.Sources)-1 {
+			for i, source := range s.Sources {
+				if source.ID == "slopify" {
+					cmd.Order = slices.Insert(cmd.Order, i, "slopify")
+					break
+				}
+			}
+		}
 		if len(cmd.Order) != len(s.Sources) {
 			http.Error(w, "Invalid source order", 400)
 			return
@@ -354,6 +460,12 @@ func (c *controller) localSourceCommand(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 		sort.SliceStable(s.Sources, func(i, j int) bool { return positions[s.Sources[i].ID] < positions[s.Sources[j].ID] })
+	}
+	if cmd.PriorityTakeoverMS != nil {
+		s.PriorityTakeoverMS = *cmd.PriorityTakeoverMS
+	}
+	if cmd.TransitionSounds != nil {
+		s.TransitionSounds = *cmd.TransitionSounds
 	}
 	if cmd.PrioritySilenceMS != nil {
 		s.PrioritySilenceMS = *cmd.PrioritySilenceMS
@@ -432,7 +544,8 @@ func observeSourceSignal(p *speakerSource, level audiometer.Window, now time.Tim
 		p.AudibleSince = time.Time{}
 	}
 	p.SignalAt = level.At
-	if level.Peak >= .001 {
+	// ceil(2^31 / 1000): -60 dBFS, compared against exact decoded PCM.
+	if level.Peak >= 2147484 {
 		if p.AudibleSince.IsZero() {
 			p.AudibleSince = level.At
 		}
@@ -493,8 +606,15 @@ func (s *speakerSources) chooseSource(now time.Time) {
 		return
 	}
 	chosen := ""
+	selectedIndex := slices.IndexFunc(s.Sources, func(p *speakerSource) bool { return p.ID == s.Selected })
 	var last time.Time
-	for _, p := range s.Sources {
+	for i, p := range s.Sources {
+		if p.QueueInput || p.SenderUnavailable {
+			continue
+		}
+		if s.Mode == "priority" && !s.priorityReady(p, i, selectedIndex, now) {
+			continue
+		}
 		if s.Mode == "priority" && prioritySourceHeld(p, s.Selected, now, s.PrioritySilenceMS) {
 			chosen = p.ID
 			break
@@ -515,8 +635,8 @@ func (s *speakerSources) chooseSource(now time.Time) {
 		}
 	}
 	if chosen == "" && s.Mode == "priority" {
-		for _, p := range s.Sources {
-			if p.ID == "slopify" && p.Connected {
+		for i, p := range s.Sources {
+			if p.ID == "slopify" && p.Connected && s.priorityReady(p, i, selectedIndex, now) {
 				chosen = p.ID
 				break
 			}
@@ -528,9 +648,9 @@ func (s *speakerSources) chooseSource(now time.Time) {
 	}
 }
 
-func (c *controller) sourceSnapshot() any {
+func (c *controller) sourceSnapshot(history ...*outputHistoryCursor) any {
 	if s := c.sourceList(); s != nil {
-		return s.snapshot()
+		return s.snapshot(history...)
 	}
 	return nil
 }
@@ -559,4 +679,13 @@ func (s *speakerSources) source(id string) *speakerSource {
 func newFixedSources() *speakerSources {
 	return &speakerSources{Fixed: true, Mode: "off", AutoMode: "recent", Selected: "slopify", Revision: 1,
 		Sources: []*speakerSource{{ID: "slopify", Name: "Slopify", Connected: true, meter: audiometer.New()}}}
+}
+
+// Only upward priority takeovers need sustained sound. Manual pins, the current
+// source and lower-priority fallback keep their existing behavior.
+func (s *speakerSources) priorityReady(p *speakerSource, index, current int, now time.Time) bool {
+	if s.PriorityTakeoverMS == 0 || current < 0 || index >= current {
+		return true
+	}
+	return !p.AudibleSince.IsZero() && now.Sub(p.SignalAt) <= time.Second && p.SignalAt.Sub(p.AudibleSince) >= time.Duration(s.PriorityTakeoverMS)*time.Millisecond
 }

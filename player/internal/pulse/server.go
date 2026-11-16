@@ -105,7 +105,6 @@ const (
 	FormatS32LE     = 7
 	FormatS24LE     = 9
 	FormatS2432LE   = 11
-	channelMono     = 0
 	channelFrontL   = 1
 	channelFrontR   = 2
 )

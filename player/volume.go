@@ -224,11 +224,22 @@ func (m *mixer) adjust(ctx context.Context, delta int) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	level := min(max(m.control.Level+delta, m.control.Min), m.control.Max)
-	if level == m.control.Level {
+	current := m.control.Level
+	level := min(max(current+delta, m.control.Min), m.control.Max)
+	if level == current {
 		return nil
 	}
-	if err := m.write(ctx, level); err != nil {
+	// Neighbouring displayed levels can share one hardware step, so the nearest
+	// raw value may display as the level we are leaving (Amp2: 59 is 60's raw).
+	// Keep stepping in the knob's direction until the display actually moves.
+	raw, step := m.mapping.raw(level), 1
+	if delta < 0 {
+		step = -1
+	}
+	for m.mapping.display(raw) == current && raw+step >= m.mapping.min && raw+step <= m.mapping.max {
+		raw += step
+	}
+	if err := m.writeRaw(raw); err != nil {
 		return err
 	}
 	m.control.Error = ""
@@ -251,7 +262,11 @@ func (m *mixer) setLevel(ctx context.Context, level int) error {
 
 // write is called with the mixer lock held, or before the mixer is published.
 func (m *mixer) write(ctx context.Context, level int) error {
-	raw := m.mapping.raw(level)
+	return m.writeRaw(m.mapping.raw(level))
+}
+
+// writeRaw sets a hardware value, clamped to the displayed bounds. Lock held.
+func (m *mixer) writeRaw(raw int) error {
 	// Quantized hardware levels must still respect the displayed cap.
 	for raw > m.mapping.min && m.mapping.display(raw) > m.control.Max {
 		raw--

@@ -36,7 +36,7 @@ func (c *controller) requestSourcePause() {
 	if leftSlopify && c.desired.State == "playing" {
 		op = "pause-if-sole-output"
 	}
-	if resume && c.desired.State == "paused" && c.desired.Current != 0 {
+	if resume && (c.desired.QueueGroup == "" || (c.desired.State == "paused" && c.desired.Current != 0)) {
 		op = "play-if-sole-output"
 	}
 	if op == "" {

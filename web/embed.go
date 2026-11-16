@@ -3,5 +3,5 @@ package web
 
 import "embed"
 
-//go:embed index.html app.js media.js network.js output.html output.js style.css sw.js manifest.webmanifest icon.svg
+//go:embed demo-music.html index.html app.js media.js network.js output.html output.js style.css sw.js manifest.webmanifest icon.svg
 var FS embed.FS

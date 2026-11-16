@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -38,6 +39,7 @@ func (s *store) copyPlayback(to, from *Player) {
 	to.Current, to.NextID = from.Current, from.NextID
 	to.Blocked, to.Repeat = from.Blocked, from.Repeat
 	to.setPos(s.pos(from), from.State)
+	to.Pause = from.Pause
 }
 
 func (s *store) outputQueue(id string) *Player {
@@ -71,12 +73,12 @@ func (s *store) outputsAvailable(q *Player) bool {
 func (s *store) selectPrimary(q *Player) {
 	ids := queueOutputs(q)
 	if slices.Contains(ids, q.OutputID) {
-		if p := s.players[q.OutputID]; p != nil && p.Connected {
+		if p := s.players[q.OutputID]; p != nil && p.reachable() {
 			return
 		}
 	}
 	for _, id := range ids {
-		if p := s.players[id]; p != nil && p.Connected {
+		if p := s.players[id]; p != nil && p.reachable() {
 			q.OutputID = id
 			return
 		}
@@ -96,10 +98,21 @@ func (s *store) selectPrimary(q *Player) {
 }
 
 func (s *store) sendQueue(q *Player) {
+	q.QueueCommand = rand.Text()
+	s.sendQueueContinuous(q)
+}
+
+// Natural forward advancement preserves the LAN transport's continuity tag.
+// Explicit commands, including seeks and repeat wraps, use sendQueue instead.
+func (s *store) sendQueueContinuous(q *Player) {
 	s.selectPrimary(q)
 	q.Connected = s.outputsAvailable(q)
 	if !q.Connected {
+		wasPlaying := q.State == Playing
 		s.pause(q)
+		if wasPlaying {
+			q.Pause = &PauseEvent{Name: "Slopify", Source: "No available outputs", At: time.Now()}
+		}
 	}
 	for _, id := range queueOutputs(q) {
 		if p := s.players[id]; p != nil {
@@ -139,13 +152,14 @@ func (s *store) setOutputs(q *Player, ids []string) error {
 		if (p.Kind == Browser || p.Kind == WebSink || p.Kind == Device) && p.Owner != q.ID {
 			return errForbidden
 		}
-		if other := s.outputQueue(id); other != nil && other != q {
+		if other := s.outputQueue(id); other != nil && other != q && p.Owner != q.ID {
 			return fmt.Errorf("%w: output is in use by another user", errBadRequest)
 		}
 		next = append(next, id)
 	}
 	old := slices.Clone(queueOutputs(q))
 	q.OutputIDs = next
+	q.touch() // choosing outputs is activity: their timeouts start again
 	s.selectPrimary(q)
 	for _, id := range old {
 		if !slices.Contains(next, id) {
@@ -172,12 +186,28 @@ func (s *store) userCommand(subject string, c command) error {
 		if err := s.setOutputs(q, c.Outputs); err != nil {
 			return err
 		}
+	case "keep":
+		if err := s.setKeep(q, c.To, c.Minutes); err != nil {
+			return err
+		}
 	default:
 		if c.Op == "adopt" || c.Op == "forget" || c.Op == "rename" {
 			return errBadRequest
 		}
+		if startsPlayback(q, c) {
+			s.expirePins(q, time.Now())
+			s.claimForBrowser(q, c.From)
+		}
+		previousState := q.State
 		if err := s.playback(q, c); err != nil {
 			return err
+		}
+		if previousState == Playing && q.State == Paused {
+			name := "Browser"
+			if from := s.players[c.From]; from != nil && from.Owner == q.ID && from.Kind == Browser {
+				name = from.Name
+			}
+			q.Pause = &PauseEvent{Name: name, Source: "Browser command", At: time.Now()}
 		}
 	}
 	q.Version++
@@ -205,9 +235,6 @@ func (s *store) attachUser(subject, browser string) {
 	}
 }
 
-func (s *store) webCommand(subject, id string, c command) error {
-	return s.webCommandFor(auth.Principal{Subject: subject, Name: subject}, id, c)
-}
 func (s *store) webCommandFor(user auth.Principal, id string, c command) error {
 	if user.Subject == "" {
 		return errForbidden
@@ -215,7 +242,7 @@ func (s *store) webCommandFor(user auth.Principal, id string, c command) error {
 	if id == "me" {
 		return s.userCommand(user.Subject, c)
 	}
-	if c.Op != "adopt" && c.Op != "rename" && c.Op != "forget" && c.Op != "volume" {
+	if c.Op != "adopt" && c.Op != "forget" && c.Op != "volume" {
 		return errBadRequest
 	}
 	s.mu.Lock()
@@ -261,15 +288,18 @@ func (s *store) webCommandFor(user auth.Principal, id string, c command) error {
 	return s.commandLocked(id, c)
 }
 
-func (s *store) browserReport(subject, id string, r report) error {
+// browserReport applies a tab's report and returns the output's resulting state.
+func (s *store) browserReport(subject, id string, r report) ([]byte, error) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	p := s.players[id]
-	allowed := p != nil && p.Kind == Browser && p.Owner == queueID(subject)
-	s.mu.Unlock()
-	if !allowed {
-		return errForbidden
+	if p == nil || p.Kind != Browser || p.Owner != queueID(subject) {
+		return nil, errForbidden
 	}
-	return s.report(id, r)
+	if err := s.reportLocked(id, r); err != nil {
+		return nil, err
+	}
+	return s.marshal(p), nil
 }
 
 func (s *store) visiblePlayer(subject string, p *Player) bool {

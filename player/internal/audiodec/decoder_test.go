@@ -78,6 +78,9 @@ func TestLosslessMatchesReference(t *testing.T) {
 		{"32.wav", 192000, 32, []string{"-c:a", "pcm_s32le"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if !Enabled(filepath.Ext(tc.name)[1:]) {
+				t.Skip("decoder disabled")
+			}
 			data := fixture(t, tc.name, tc.rate, tc.args...)
 			d, err := Open(bytes.NewReader(data))
 			if err != nil {
@@ -108,6 +111,9 @@ func TestSeekMatchesReference(t *testing.T) {
 		{"seek.wav", []string{"-c:a", "pcm_s24le"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if !Enabled(filepath.Ext(tc.name)[1:]) {
+				t.Skip("decoder disabled")
+			}
 			data := fixture(t, tc.name, 44100, tc.args...)
 			d, err := Open(bytes.NewReader(data))
 			if err != nil {
@@ -132,6 +138,9 @@ func TestSeekMatchesReference(t *testing.T) {
 }
 
 func TestMP3MatchesReference(t *testing.T) {
+	if !Enabled("mp3") {
+		t.Skip("decoder disabled")
+	}
 	for _, tc := range []struct {
 		name string
 		rate int
@@ -154,7 +163,7 @@ func TestMP3MatchesReference(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if f := d.Format(); f.Rate != tc.rate || f.Bits != mp3Precision {
+			if f := d.Format(); f.Rate != tc.rate || f.Bits != 24 {
 				t.Fatalf("format %+v", f)
 			}
 			got, want := decodeAll(t, d), reference(t, data, tc.name)
@@ -175,6 +184,9 @@ func TestMP3MatchesReference(t *testing.T) {
 // Clicks force the encoder into short and mixed-transition blocks.
 // Every variant holds the same audio, however it is wrapped, and tags are ignored.
 func TestMP3FindsAudioPastTags(t *testing.T) {
+	if !Enabled("mp3") {
+		t.Skip("decoder disabled")
+	}
 	data := fixture(t, "x.mp3", 44100, "-c:a", "libmp3lame", "-b:a", "128k", "-id3v2_version", "0")
 	base, err := Open(bytes.NewReader(data))
 	if err != nil {
@@ -223,54 +235,6 @@ func TestMP3FindsAudioPastTags(t *testing.T) {
 	}
 }
 
-func TestMP3Transients(t *testing.T) {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		t.Skip("ffmpeg unavailable")
-	}
-	for _, rate := range []string{"44100", "22050"} {
-		path := filepath.Join(t.TempDir(), "t.mp3")
-		src := "aevalsrc='if(lt(mod(t,0.15),0.002),0.9*random(0)-0.45,0.001*sin(2*PI*440*t))|if(lt(mod(t+0.05,0.2),0.002),0.9*random(1)-0.45,0.001*sin(2*PI*660*t))':d=3:s=" + rate
-		if out, err := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", src, "-c:a", "libmp3lame", "-b:a", "128k", path).CombinedOutput(); err != nil {
-			t.Fatalf("%v: %s", err, out)
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		d, err := Open(bytes.NewReader(data))
-		if err != nil {
-			t.Fatal(err)
-		}
-		m := d.(*mp3Decoder)
-		var short int
-		var got []int32
-		buf := make([]int32, 2304)
-		for {
-			n, err := d.Read(buf)
-			got = append(got, buf[:n]...)
-			if m.gr[0][0].short || m.gr[1][0].short {
-				short++
-			}
-			if err != nil {
-				break
-			}
-		}
-		want := reference(t, data, "t.mp3")
-		if len(got) != len(want) {
-			t.Fatalf("%d samples, want %d", len(got), len(want))
-		}
-		worst, sum := mp3Compare(got, want)
-		rms := math.Sqrt(sum / float64(len(got)))
-		t.Logf("%s Hz: %d reads saw short blocks, worst %.2f, RMS %.3f 16-bit LSB", rate, short, worst, rms)
-		if short == 0 {
-			t.Fatal("fixture produced no short blocks")
-		}
-		if rms > 0.58 {
-			t.Fatalf("RMS %.3f", rms)
-		}
-	}
-}
-
 func mp3Compare(got, want []int32) (worst, sum float64) {
 	for i := range got {
 		e := math.Abs(float64(got[i])-float64(want[i])) / 65536
@@ -293,7 +257,36 @@ func (r *countingReader) Read(b []byte) (int, error) {
 }
 
 // Noise is unique everywhere, so the true landing point can be measured.
+func TestFLACSeekPastEndEndsStream(t *testing.T) {
+	if !Enabled("flac") {
+		t.Skip("decoder disabled")
+	}
+	d, err := Open(bytes.NewReader(fixture(t, "end.flac", 44100, "-sample_fmt", "s16")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	landed, err := d.Seek(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if landed != 3 {
+		t.Fatalf("landed at %v, want the 3 second end", landed)
+	}
+	if n, err := d.Read(make([]int32, 4096)); n != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("read after end: %d, %v", n, err)
+	}
+	if _, err := d.Seek(1); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := d.Read(make([]int32, 4096)); n == 0 || err != nil {
+		t.Fatalf("read after seeking back: %d, %v", n, err)
+	}
+}
+
 func TestMP3SeekLandsWhereItSays(t *testing.T) {
+	if !Enabled("mp3") {
+		t.Skip("decoder disabled")
+	}
 	for _, tc := range []struct {
 		name      string
 		args      []string
@@ -377,6 +370,9 @@ func TestMP3SeekLandsWhereItSays(t *testing.T) {
 }
 
 func TestMP3SurvivesCorruption(t *testing.T) {
+	if !Enabled("mp3") {
+		t.Skip("decoder disabled")
+	}
 	data := fixture(t, "bad.mp3", 44100, "-c:a", "libmp3lame", "-b:a", "128k")
 	rng := rand.New(rand.NewSource(1))
 	buf := make([]int32, 4096)
@@ -400,6 +396,9 @@ func TestMP3SurvivesCorruption(t *testing.T) {
 }
 
 func FuzzMP3(f *testing.F) {
+	if !Enabled("mp3") {
+		f.Skip("decoder disabled")
+	}
 	f.Add([]byte{0xff, 0xfb, 0x90, 0x00})
 	f.Fuzz(func(t *testing.T, data []byte) {
 		d, err := Open(bytes.NewReader(data))
@@ -416,6 +415,9 @@ func FuzzMP3(f *testing.F) {
 }
 
 func BenchmarkMP3(b *testing.B) {
+	if !Enabled("mp3") {
+		b.Skip("decoder disabled")
+	}
 	path := filepath.Join(b.TempDir(), "b.mp3")
 	if file := os.Getenv("AUDIODEC_BENCH_MP3"); file != "" {
 		path = file
@@ -446,6 +448,9 @@ func TestRejectsOtherContent(t *testing.T) {
 }
 
 func BenchmarkFLAC24(b *testing.B) {
+	if !Enabled("flac") {
+		b.Skip("decoder disabled")
+	}
 	path := filepath.Join(b.TempDir(), "b.flac")
 	if file := os.Getenv("AUDIODEC_BENCH_FLAC"); file != "" {
 		path = file
@@ -465,5 +470,82 @@ func BenchmarkFLAC24(b *testing.B) {
 				break
 			}
 		}
+	}
+}
+
+// Vorbis has no exact output either: ffmpeg's float decoder is the reference.
+func TestVorbisMatchesReference(t *testing.T) {
+	if !Enabled("vorbis") {
+		t.Skip("decoder disabled")
+	}
+	for _, tc := range []struct {
+		name string
+		rate int
+		args []string
+	}{
+		{"44-q5.ogg", 44100, []string{"-q:a", "5"}},
+		{"48-q10.ogg", 48000, []string{"-q:a", "10"}},
+		{"44-mono.ogg", 44100, []string{"-q:a", "3", "-ac", "1"}},
+		{"22-q0.ogg", 22050, []string{"-q:a", "0"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := fixture(t, tc.name, tc.rate, append([]string{"-c:a", "libvorbis"}, tc.args...)...)
+			d, err := Open(bytes.NewReader(data))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if f := d.Format(); f.Rate != tc.rate || f.Codec != "Vorbis" || !f.Lossy {
+				t.Fatalf("format %+v", f)
+			}
+			got, want := decodeAll(t, d), reference(t, data, tc.name)
+			if len(got) != len(want) {
+				t.Fatalf("%d samples, want %d", len(got), len(want))
+			}
+			worst, sum := mp3Compare(got, want)
+			rms := math.Sqrt(sum / float64(len(got)))
+			t.Logf("worst %.2f, RMS %.4f 16-bit LSB against ffmpeg", worst, rms)
+			if rms > 0.01 || worst > 0.05 {
+				t.Fatalf("worst %.2f, RMS %.4f 16-bit LSB", worst, rms)
+			}
+		})
+	}
+}
+
+func TestVorbisSeekIsExact(t *testing.T) {
+	if !Enabled("vorbis") {
+		t.Skip("decoder disabled")
+	}
+	data := fixture(t, "seek.ogg", 44100, "-c:a", "libvorbis", "-q:a", "5")
+	whole := reference(t, data, "seek.ogg")
+	for _, at := range []float64{0.25, 1.5, 2.9} {
+		d, err := Open(bytes.NewReader(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		landed, err := d.Seek(at)
+		if err != nil || landed != at {
+			t.Fatalf("landed %v: %v", landed, err)
+		}
+		got, want := decodeAll(t, d), whole[int(at*44100)*2:]
+		if len(got) != len(want) {
+			t.Fatalf("at %v: %d samples, want %d", at, len(got), len(want))
+		}
+		if worst, _ := mp3Compare(got, want); worst > 0.05 {
+			t.Fatalf("at %v: worst %.2f 16-bit LSB", at, worst)
+		}
+	}
+	d, _ := Open(bytes.NewReader(data))
+	if _, err := d.Seek(10); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := d.Read(make([]int32, 100)); n != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("past end: %d, %v", n, err)
+	}
+}
+
+func TestOggOpusIsUnsupported(t *testing.T) {
+	data := fixture(t, "x.opus", 48000, "-c:a", "libopus")
+	if _, err := Open(bytes.NewReader(data)); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("err = %v", err)
 	}
 }

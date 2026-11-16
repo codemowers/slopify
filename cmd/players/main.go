@@ -48,6 +48,7 @@ func main() {
 		os.Exit(1)
 	}
 	go s.persist()
+	go s.sweepPins(ctx)
 	go s.runIdleSinks(ctx)
 
 	mux := http.NewServeMux()
@@ -79,7 +80,16 @@ func main() {
 			http.Error(w, "devices report through /device", http.StatusForbidden)
 			return
 		}
-		respond(w, s.browserReport(auth.Subject(r), r.PathValue("id"), rep))
+		// The reply carries the output's state, so a tab whose event stream is
+		// down, such as an installed app in the background, still learns the
+		// next track from its own "ended" report.
+		state, err := s.browserReport(auth.Subject(r), r.PathValue("id"), rep)
+		if err != nil {
+			respond(w, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(state)
 	})
 
 	authorizer, err := auth.New(ctx)
@@ -240,6 +250,8 @@ func (s *store) browserEvents(w http.ResponseWriter, r *http.Request) {
 				if !p.NameSet {
 					p.Name = name
 				}
+				// An installed app says so on every connection; a tab never does.
+				p.Background = r.URL.Query().Get("background") == "1"
 				return nil
 			})
 		if err != nil {

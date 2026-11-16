@@ -64,13 +64,13 @@ func TestSourcePinOrderAndPersistence(t *testing.T) {
 func TestMeterGapDoesNotInventSoundRestart(t *testing.T) {
 	now := time.Now()
 	p := &speakerSource{}
-	observeSourceSignal(p, audiometer.Window{At: now, Peak: .01}, now)
+	observeSourceSignal(p, audiometer.Window{At: now, Peak: (1 << 31) / 100}, now)
 	started := p.LastSound
 	observeSourceSignal(p, audiometer.Window{At: now, Peak: 0}, now.Add(3*time.Second))
 	if !p.Sounding || p.LastSound != started {
 		t.Fatal("missing telemetry was treated as silence")
 	}
-	observeSourceSignal(p, audiometer.Window{At: now.Add(4 * time.Second), Peak: .01}, now.Add(4*time.Second))
+	observeSourceSignal(p, audiometer.Window{At: now.Add(4 * time.Second), Peak: (1 << 31) / 100}, now.Add(4*time.Second))
 	if p.LastSound != started {
 		t.Fatal("meter recovery invented a sound start")
 	}
@@ -88,7 +88,7 @@ func TestSourceHistoryIsBoundedAndSurvivesRefresh(t *testing.T) {
 	now := time.Now()
 	p := &speakerSource{ID: "slopify"}
 	for i := 0; i < 200; i++ {
-		rememberSourcePeak(p, audiometer.Window{Sequence: uint64(i + 1), At: now.Add(time.Duration(i-199) * 200 * time.Millisecond), Peak: .25}, now)
+		rememberSourcePeak(p, audiometer.Window{Sequence: uint64(i + 1), At: now.Add(time.Duration(i-199) * 200 * time.Millisecond), Peak: 1 << 29}, now)
 	}
 	if len(p.history) != 150 {
 		t.Fatalf("history length %d", len(p.history))
@@ -112,20 +112,34 @@ func TestSourceHistoryIsBoundedAndSurvivesRefresh(t *testing.T) {
 	}
 }
 
+func TestSoundThresholdUsesPCMPrecision(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		peak     uint32
+		sounding bool
+	}{{2147483, false}, {2147484, true}} {
+		p := &speakerSource{}
+		observeSourceSignal(p, audiometer.Window{At: now, Peak: tc.peak}, now)
+		if p.Sounding != tc.sounding {
+			t.Fatalf("PCM peak %d: sounding=%v", tc.peak, p.Sounding)
+		}
+	}
+}
+
 func TestSoundGuardRequiresFreshSustainedSamples(t *testing.T) {
 	p := &speakerSource{}
 	start := time.Now()
-	sample := func(ms int, peak float64) {
+	sample := func(ms int, peak uint32) {
 		at := start.Add(time.Duration(ms) * time.Millisecond)
 		observeSourceSignal(p, audiometer.Window{At: at, Peak: peak}, at)
 	}
-	sample(0, .01)
-	sample(200, .01)
-	sample(400, .01)
+	sample(0, (1<<31)/100)
+	sample(200, (1<<31)/100)
+	sample(400, (1<<31)/100)
 	if p.SignalAt.Sub(p.AudibleSince) >= 500*time.Millisecond {
 		t.Fatal("short burst qualified")
 	}
-	sample(600, .01)
+	sample(600, (1<<31)/100)
 	if p.SignalAt.Sub(p.AudibleSince) < 500*time.Millisecond {
 		t.Fatal("sustained sound did not qualify")
 	}
@@ -133,8 +147,8 @@ func TestSoundGuardRequiresFreshSustainedSamples(t *testing.T) {
 	if !p.AudibleSince.IsZero() {
 		t.Fatal("silence did not reset guard")
 	}
-	sample(1000, .01)
-	sample(1800, .01)
+	sample(1000, (1<<31)/100)
+	sample(1800, (1<<31)/100)
 	if p.AudibleSince != p.SignalAt {
 		t.Fatal("missing samples counted as sustained sound")
 	}

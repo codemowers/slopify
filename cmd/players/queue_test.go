@@ -8,11 +8,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/codemowers/slopify/internal/auth"
 	"github.com/codemowers/slopify/internal/events"
 )
 
 func queueStore() *store {
 	return &store{players: map[string]*Player{}, hub: events.NewHub[message](), dirty: make(chan struct{}, 1)}
+}
+
+func (s *store) command(id string, c command) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.commandLocked(id, c)
+}
+
+func (s *store) webCommand(subject, id string, c command) error {
+	return s.webCommandFor(auth.Principal{Subject: subject, Name: subject}, id, c)
 }
 
 func addBrowser(t *testing.T, s *store, user, id string) func() {
@@ -105,7 +116,7 @@ func TestQueueIsolationAndStaleReports(t *testing.T) {
 	if err := s.userCommand("bob", command{Op: "transfer", To: "web-alice"}); !errors.Is(err, errForbidden) {
 		t.Fatalf("foreign browser allowed: %v", err)
 	}
-	if err := s.browserReport("bob", "web-alice", report{}); !errors.Is(err, errForbidden) {
+	if _, err := s.browserReport("bob", "web-alice", report{}); !errors.Is(err, errForbidden) {
 		t.Fatalf("foreign report allowed: %v", err)
 	}
 	if err := s.webCommand("bob", queueID("alice"), command{Op: "forget"}); !errors.Is(err, errForbidden) {

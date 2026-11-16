@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -19,18 +21,55 @@ type Principal struct{ Issuer, Subject, Name string }
 
 func User(r *http.Request) Principal { p, _ := r.Context().Value(principalKey{}).(Principal); return p }
 
-type Authorizer struct{ verifier *oidc.IDTokenVerifier }
+type Authorizer struct {
+	verifier  *oidc.IDTokenVerifier
+	anonymous bool
+}
+
+// AnonymousEnabled is explicit: missing OIDC settings never disable authentication.
+func AnonymousEnabled() bool { return os.Getenv("SLOPIFY_ANONYMOUS") == "true" }
+
+// AnonymousRequest prevents cross-site browser mutations of the shared queue.
+func AnonymousRequest(r *http.Request) bool {
+	if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+		return false
+	}
+	if origin := r.Header.Get("Origin"); origin != "" {
+		u, err := url.Parse(origin)
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		if err != nil || u.Scheme != scheme || u.Host != r.Host || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+			return false
+		}
+	}
+	return r.Method == http.MethodGet || r.Method == http.MethodHead || r.Header.Get("X-Slopify-Request") == "1"
+}
 
 func New(ctx context.Context) (*Authorizer, error) {
+	if AnonymousEnabled() {
+		return &Authorizer{anonymous: true}, nil
+	}
 	provider, err := oidc.NewProvider(ctx, httpx.Env("OIDC_ISSUER"))
 	if err != nil {
 		return nil, err
 	}
-	return &Authorizer{provider.Verifier(&oidc.Config{ClientID: httpx.Env("OIDC_AUDIENCE")})}, nil
+	return &Authorizer{verifier: provider.Verifier(&oidc.Config{ClientID: httpx.Env("OIDC_AUDIENCE")})}, nil
 }
 func Subject(r *http.Request) string { s, _ := r.Context().Value(userKey{}).(string); return s }
 func (a *Authorizer) Require(scope func(*http.Request) string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if a.anonymous {
+			if !AnonymousRequest(r) {
+				http.Error(w, "same-origin Slopify request required", http.StatusForbidden)
+				return
+			}
+			r.Header.Del("X-Slopify-User")
+			ctx := context.WithValue(r.Context(), principalKey{}, Principal{Issuer: "slopify:anonymous", Subject: "anonymous", Name: "Anonymous"})
+			next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, userKey{}, "anonymous")))
+			return
+		}
 		raw, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		parts := strings.Split(raw, ".")
 		var header struct {

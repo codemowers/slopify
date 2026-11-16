@@ -18,9 +18,6 @@ func (c *controller) runKnob(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case e := <-c.knob:
-			if e.delta != 0 && c.amp != nil {
-				c.amp.adjust(e.delta)
-			}
 			if e.delta != 0 && c.mixer != nil {
 				if err := c.mixer.adjust(ctx, e.delta); err != nil {
 					slog.Warn("adjusting knob volume", "err", err)
@@ -35,7 +32,7 @@ func (c *controller) runKnob(ctx context.Context) {
 					c.reportVolume(ctx)
 				}
 			}
-			if op := e.action.buttonOp(); op != "" {
+			if op := e.action.buttonOp(); op != "" && !c.remoteButton(op) {
 				// Do not let a stalled playback command stop volume actuation.
 				select {
 				case c.buttons <- op:

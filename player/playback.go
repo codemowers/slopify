@@ -6,12 +6,10 @@ import (
 )
 
 // Queue ownership, network reporting and hardware controls stay in controller.
-// A backend owns decoding, buffering and its output's process lifecycle. Start
-// follows close of the previous session; Close releases persistent resources.
-// mpv is the only engine today; a native Go engine would implement this too.
+// The decoder backend owns buffering and audio output. Starting playback
+// follows closing the previous session, which releases its output resources.
 type playbackBackend interface {
 	Start(uint64, float64) playbackSession
-	Close()
 }
 
 type playbackSession interface {
@@ -27,11 +25,12 @@ type playbackServices struct {
 	queue        *queueView
 	streamURL    func(context.Context, uint64) (string, error)
 	events       chan<- event
-	decodedState func(format, string)
+	decodedState func(string)
 	// formats reports what a backend reads and what the device actually receives.
 	formats func(id uint64, input, output localPCM)
-	// peak reports a full-scale peak amplitude and when that audio was heard.
-	peak func(float64, time.Time)
+	// peak reports an absolute S32 PCM magnitude and when that audio was heard.
+	peak       func(uint32, time.Time)
+	inputStats func(sourceInput)
 }
 
 func (s *session) failure() bool      { return s.failed.Load() }

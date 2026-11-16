@@ -64,6 +64,8 @@ type Entry struct {
 	VideoCodec string  `json:"videoCodec,omitempty"`
 	// Tags is what the file itself says; absent for untagged files.
 	Tags *Info `json:"tags,omitempty"`
+	// Credits are further well-known tags, absent when the file has none.
+	Credits *Credits `json:"credits,omitempty"`
 	// Guess is derived from directory and file names.
 	Guess      Info    `json:"guess"`
 	Confidence float64 `json:"confidence"`
@@ -99,6 +101,26 @@ func (e Entry) Display() Info {
 		}
 	}
 	return d
+}
+
+// Credits are well-known tags beyond the browsing fields. Identifiers are
+// validated by the indexer, so readers may build links from them.
+type Credits struct {
+	Composer  string `json:"composer,omitempty"`
+	Copyright string `json:"copyright,omitempty"`
+	License   string `json:"license,omitempty"`
+	Label     string `json:"label,omitempty"`
+	// ISRC is normalized to its 12 characters without hyphens.
+	ISRC     string `json:"isrc,omitempty"`
+	AcoustID string `json:"acoustid,omitempty"`
+	// MusicBrainz identifiers are lowercase UUIDs.
+	Recording    string   `json:"mbRecording,omitempty"`
+	ReleaseTrack string   `json:"mbTrack,omitempty"`
+	Release      string   `json:"mbRelease,omitempty"`
+	ReleaseGroup string   `json:"mbReleaseGroup,omitempty"`
+	Work         string   `json:"mbWork,omitempty"`
+	Artists      []string `json:"mbArtists,omitempty"`
+	AlbumArtists []string `json:"mbAlbumArtists,omitempty"`
 }
 
 type Sidecar struct {

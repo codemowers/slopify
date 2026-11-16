@@ -1,7 +1,7 @@
 // Command player is the Slopify output for devices such as a Raspberry Pi
 // with a HiFiBerry board: an HTTPS-only counterpart of squeezelite. It
 // receives its output's state over Server-Sent Events, decodes the original
-// files locally with ffmpeg, plays them gaplessly through ALSA and reports
+// files locally in Go, plays them gaplessly through ALSA and reports
 // progress back with POSTs. The first start generates a token that pairs the
 // device with the server; adopt the device in the web app to use it.
 package main
@@ -18,19 +18,22 @@ import (
 	"fmt"
 	"github.com/codemowers/slopify/player/internal/alsa"
 	"github.com/codemowers/slopify/player/internal/esound"
-	"github.com/codemowers/slopify/player/internal/lirc"
+	"github.com/codemowers/slopify/player/internal/raop"
 	"github.com/codemowers/slopify/player/internal/receiverconfig"
+	"github.com/codemowers/slopify/player/internal/rtp"
 	"io"
 	"io/fs"
 	"log/slog"
 	"math"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/codemowers/slopify/internal/httpx"
@@ -41,6 +44,8 @@ const version = "0.1"
 
 // state is the part of the output's state the player acts on.
 type state struct {
+	QueueGroup   string          `json:"queueGroup"`
+	QueueCommand string          `json:"queueCommand"`
 	Volume       *volume.Control `json:"volume,omitempty"`
 	CurrentEntry *entry          `json:"currentEntry"`
 	Adopted      bool            `json:"adopted"`
@@ -92,6 +97,9 @@ func (s *state) playbackQueue() []entry {
 }
 
 func main() {
+	if status, ok := fileCommand(os.Args[1:]); ok {
+		os.Exit(status)
+	}
 	receivers, configErr := receiverconfig.FromEnv()
 	if configErr != nil {
 		slog.Error("receiver configuration", "err", configErr)
@@ -101,41 +109,64 @@ func main() {
 	volumeCard := flag.String("volume-card", "", "ALSA mixer card ID")
 	volumeMin := flag.Int("volume-min", 0, "minimum alsamixer displayed volume (0..100)")
 	volumeMax := flag.Int("volume-max", 40, "maximum alsamixer displayed volume (0..100)")
-	volumeInitial := flag.Int("volume-initial", 20, "alsamixer displayed volume set once at player startup")
-	rotaryInput := flag.String("rotary-input", "", "relative-axis input device, a /dev path or kernel device name such as rotary@17 (optional)")
-	buttonInput := flag.String("button-input", "", "play/pause input device, path or kernel name[:keycode], default key KEY_PLAYPAUSE (optional)")
-	previousInput := flag.String("previous-input", "", "previous-track input device, path or kernel name[:keycode], default key KEY_PREVIOUSSONG (optional)")
-	nextInput := flag.String("next-input", "", "next-track input device, path or kernel name[:keycode], default key KEY_NEXTSONG (optional)")
-	muteInput := flag.String("mute-input", "", "mute input device, path or kernel name[:keycode], default key KEY_MUTE (optional)")
-	engine := flag.String("playback-engine", "native", "playback engine: native (Go decoding, direct ALSA, mpv fallback when installed) or mpv")
+	volumeInitial := flag.Int("volume-initial", 10, "alsamixer displayed volume set once at player startup")
+	rotaryInput := flag.String("rotary-input", "", "relative-axis rotary device or kernel name for volume; separate from media keys")
+	var inputSpecs []string
+	flag.Func("input", "selected input event device or kernel name; repeat for multiple devices; standard media keys only", func(value string) error {
+		inputSpecs = append(inputSpecs, value)
+		return nil
+	})
 	localSourceControl := flag.Bool("local-source-control", false, "enable source pinning, arbitration and peak meters")
 	localState := flag.String("local-state", "/var/lib/slopify-player/local-audio.json", "local source settings file; empty keeps settings in memory")
-	localPulse := flag.Bool("local-pulse", receivers.Pulse, "advertise configured Pulse receiver in local sender setup")
-	airplayMetadataListen := flag.String("airplay-metadata-listen", os.Getenv("SLOPIFY_AIRPLAY_METADATA_LISTEN"), "loopback UDP endpoint for Shairport sender metadata and hardware volume")
-	localAirPlay := flag.Bool("local-airplay", receivers.AirPlay, "advertise configured AirPlay receiver in local sender setup")
-	pulseListen := flag.String("pulse-listen", "", "native engine: trusted-LAN Pulse receiver address, for example 192.0.2.10:4713; no authentication")
-	esoundListen := flag.String("esound-listen", "", "native engine: trusted-LAN ESound receiver address, for example 192.0.2.10:16001; no authentication")
-	pulseBufferMS := flag.Int("pulse-buffer-ms", 0, "least Pulse stream buffer in milliseconds, 0 to 2000; 0 honours the sender, and a PipeWire tunnel ticks above about 100")
+	localPulse := flag.Bool("local-pulse", receivers.Pulse, "show the PulseAudio/PipeWire receiver in local sender setup")
+	pulseListen := flag.String("pulse-listen", "", "trusted-LAN PulseAudio/PipeWire receiver address, for example 192.0.2.10:4713; no authentication")
+	esoundListen := flag.String("esound-listen", "", "trusted-LAN ESound receiver address, for example 192.0.2.10:16001; no authentication")
+	pulseBufferMS := flag.Int("pulse-buffer-ms", 0, "least PulseAudio/PipeWire stream buffer in milliseconds, 0 to 2000; 0 honours the sender, and a PipeWire tunnel ticks above about 100")
+	var tuning tcpTuning
+	flag.DurationVar(&tuning.DialTimeout, "tcp-dial-timeout", 8*time.Second, "time allowed to open an outbound connection; 0 for no limit")
+	flag.DurationVar(&tuning.UserTimeout, "tcp-user-timeout", 20*time.Second, "drop an outbound connection whose sent data stays unacknowledged this long (TCP_USER_TIMEOUT, Linux); 0 for the system default of about 15 minutes")
+	flag.DurationVar(&tuning.KeepAliveIdle, "tcp-keepalive-idle", 15*time.Second, "idle time before TCP keepalive probes on outbound connections; 0 for the system default")
+	flag.DurationVar(&tuning.KeepAliveInterval, "tcp-keepalive-interval", 5*time.Second, "time between TCP keepalive probes; 0 for the system default")
+	flag.IntVar(&tuning.KeepAliveCount, "tcp-keepalive-count", 3, "unanswered TCP keepalive probes before dropping the connection; 0 for the system default")
+	readAheadMiB := flag.Int("read-ahead-mib", -1, "memory for downloading originals ahead of decoding, the current track to its end and then the next; -1 for half the memory limit (at most 1024), 0 to fetch only as decoding needs")
+	flag.BoolVar(&allowOutputTruncate, "allow-truncate", false, "ALSA: permit truncating to 16-bit output if no precision-preserving format works")
 	liveDeviceMS := flag.Int("live-device-buffer-ms", 0, "ALSA buffer for LAN sources in milliseconds, 40 to 2000; 0 lets the device choose within 150 to 250")
 	esoundBufferMS := flag.Int("esound-buffer-ms", esound.DefaultBufferMillis, "ESound stream buffer in milliseconds, 20 to 2000")
 	esoundSocketMS := flag.Int("esound-socket-ms", 0, "cap ESound's kernel receive queue, in milliseconds of audio; 0 leaves the system default, which adds delay")
-	irDevice := flag.String("ir-device", os.Getenv("SLOPIFY_IR_DEVICE"), "opt-in LIRC device driving an amplifier's motorised volume knob, for example /dev/lirc0")
-	irAddress := flag.String("ir-address", httpx.EnvOr("SLOPIFY_IR_ADDRESS", "0x877C"), "NEC extended address of the amplifier")
-	irVolumeUp := flag.String("ir-volume-up", httpx.EnvOr("SLOPIFY_IR_VOLUME_UP", "0x88"), "IR command for volume up")
-	irVolumeDown := flag.String("ir-volume-down", httpx.EnvOr("SLOPIFY_IR_VOLUME_DOWN", "0x8C"), "IR command for volume down")
-	irPowerOn := flag.String("ir-power-on", httpx.EnvOr("SLOPIFY_IR_POWER_ON", "0x25"), "IR command for power on")
-	irPowerOff := flag.String("ir-power-off", httpx.EnvOr("SLOPIFY_IR_POWER_OFF", "0xC8"), "IR command for power off")
-	irSweep := flag.Duration("ir-sweep", envDuration("SLOPIFY_IR_SWEEP", 6*time.Second), "time to hold volume down, longer than the knob's full travel")
-	irIdleOff := flag.Duration("ir-idle-off", envDuration("SLOPIFY_IR_IDLE_OFF", 5*time.Minute), "silence before sweeping to zero and powering off")
-	irWake := flag.Duration("ir-wake", envDuration("SLOPIFY_IR_WAKE", 3*time.Second), "wait after power on before volume commands")
-	irRepeat := flag.Duration("ir-repeat", envDuration("SLOPIFY_IR_REPEAT", 110*time.Millisecond), "time between IR commands")
-	irInitialSteps := flag.Int("ir-initial-steps", envInt("SLOPIFY_IR_INITIAL_STEPS", 0), "volume steps up from zero until a level has been saved")
-	irMaxSteps := flag.Int("ir-max-steps", envInt("SLOPIFY_IR_MAX_STEPS", 60), "most volume steps up from zero, so that nothing can drive the knob to full")
-	irState := flag.String("ir-state", httpx.EnvOr("SLOPIFY_IR_STATE", "/var/lib/slopify-player/ir-amp.json"), "file remembering the amp's volume steps; empty keeps them in memory")
-	upnpListen := flag.String("upnp-listen", "", "native engine: trusted-LAN UPnP media renderer HTTP address, for example 192.0.2.10:49494; also answers SSDP on UDP 1900; no authentication")
+	raopListen := flag.String("raop-listen", "", "trusted-LAN AirPlay 1 (RAOP) receiver address, for example :5000; advertised over mDNS, no authentication")
+	raopBufferMS := flag.Int("raop-buffer-ms", raop.DefaultBufferMillis, "RAOP playout delay in milliseconds, 20 to 2000")
+	raopKey := flag.String("raop-key", "", "enable RAOP encryption, which Apple devices require, with this RSA key file; it must be the RAOP key")
+	raopKeyCheck := flag.Bool("raop-key-check", false, "verify the -raop-key file and exit")
+	rtpReceive := flag.Bool("rtp-receive", false, "trusted-LAN receiver for multicast RTP announced over SAP (L16 and L24); no authentication")
+	queueShare := flag.Bool("queue-share", false, "deduplicate same-queue original downloads over trusted-LAN multicast; requires local source control and RTP reception")
+	rtpInterface := flag.String("rtp-interface", "", "network interface for rtp-receive and rtp-send; empty lets the system choose")
+	rtpSend := flag.Bool("rtp-send", false, "multicast Slopify audio over RTP, announced over SAP with track titles in clear text; no authentication or encryption")
+	rtpSendGroup := flag.String("rtp-send-group", "", "multicast ADDRESS or ADDRESS:PORT for rtp-send; empty picks a random one at each start")
+	rtpBufferMS := flag.Int("rtp-buffer-ms", rtp.DefaultBufferMillis, "RTP stream delay in milliseconds, 20 to 1000; it holds twice this to absorb clock drift")
+	upnpListen := flag.String("upnp-listen", "", "trusted-LAN UPnP media renderer HTTP address, for example 192.0.2.10:49494; also answers SSDP on UDP 1900; no authentication")
 	localListen := flag.String("local-listen", "", "optional trusted-LAN status, hardware volume and setup web UI listen address")
+	flag.BoolVar(&metricsEnabled, "metrics", metricsEnabled, "enable Prometheus collection and local /metrics; default off on MIPS")
+	localSSEInterval := flag.Duration("local-sse-interval", 200*time.Millisecond, "local UI status update interval, 100ms to 10s; slower updates reduce CPU use")
+	localSettingsURL := flag.String("local-settings-url", "", "device settings link in local UI (HTTP(S) URL or relative path)")
+	localSettingsPort := flag.Int("local-settings-port", 0, "override port for the local settings link (0 keeps URL port)")
 	listAudio := flag.Bool("list-audio", false, "print sound cards and their volume controls as JSON, then exit")
+	flag.IntVar(&cueLevelDB, "cue-level-db", -6, "sound cue peak in dBFS (-60 to 0); buffering drone is 6 dB lower")
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s [flags]\n       %s play [flags] FILE...\n       %s validate [flags] FILE...\n\nMedia keys and rotary controls use Linux input devices through -input.\nUse input-info to list input device names.\n\n", os.Args[0], os.Args[0], os.Args[0])
+		flag.PrintDefaults()
+	}
 	flag.Parse()
+	if cueLevelDB < -60 || cueLevelDB > 0 {
+		slog.Error("cue-level-db must be -60 to 0 dBFS")
+		os.Exit(2)
+	}
+	if *raopKeyCheck {
+		if _, err := raop.LoadKey(*raopKey); err != nil {
+			slog.Error("raop key", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if *listAudio {
 		cards, err := alsa.Cards()
 		if err == nil {
@@ -148,16 +179,32 @@ func main() {
 		return
 	}
 	sourceOutput := httpx.EnvOr("SLOPIFY_OUTPUT", "aplay:hw:0,0")
-	if *localSourceControl && (*engine != "native" || *localListen == "") {
-		slog.Error("local-source-control requires the native engine and local-listen")
+	if *localSSEInterval < 100*time.Millisecond || *localSSEInterval > 10*time.Second {
+		slog.Error("local-sse-interval must be 100ms–10s")
 		os.Exit(2)
 	}
-	if *pulseListen != "" && (*engine != "native" || !*localSourceControl) {
-		slog.Error("pulse-listen requires the native engine and local-source-control")
+	if *queueShare && (!*rtpReceive || !*localSourceControl) {
+		slog.Error("queue-share requires local source control and rtp-receive")
 		os.Exit(2)
 	}
-	if *esoundListen != "" && (*engine != "native" || !*localSourceControl) {
-		slog.Error("esound-listen requires the native engine and local-source-control")
+	if *localSettingsPort < 0 || *localSettingsPort > 65535 {
+		slog.Error("local-settings-port must be 0–65535")
+		os.Exit(2)
+	}
+	if *localSourceControl && *localListen == "" {
+		slog.Error("local-source-control requires local-listen")
+		os.Exit(2)
+	}
+	if *pulseListen != "" && !*localSourceControl {
+		slog.Error("pulse-listen requires local-source-control")
+		os.Exit(2)
+	}
+	if *esoundListen != "" && !*localSourceControl {
+		slog.Error("esound-listen requires local-source-control")
+		os.Exit(2)
+	}
+	if *raopListen != "" && (!*localSourceControl || *raopBufferMS < 20 || *raopBufferMS > 2000) {
+		slog.Error("raop-listen requires local-source-control, and raop-buffer-ms must be 20 to 2000")
 		os.Exit(2)
 	}
 	if *pulseBufferMS < 0 || *pulseBufferMS > 2000 || *liveDeviceMS != 0 && (*liveDeviceMS < 40 || *liveDeviceMS > 2000) {
@@ -165,50 +212,70 @@ func main() {
 		os.Exit(2)
 	}
 	liveDeviceBufferMS = *liveDeviceMS
+	switch {
+	case *readAheadMiB < -1:
+		slog.Error("read-ahead-mib must be -1 (automatic), 0 (off) or a size in MiB")
+		os.Exit(2)
+	case *readAheadMiB == -1:
+		readAheadBytes = autoReadAhead()
+	default:
+		readAheadBytes = int64(*readAheadMiB) << 20
+	}
+	if readAheadBytes > 0 {
+		if before, after := raiseMemoryLimit(readAheadBytes); after != before {
+			slog.Info("read-ahead", "mib", readAheadBytes>>20, "gomemlimitMiB", after>>20, "wasMiB", before>>20)
+		} else {
+			slog.Info("read-ahead", "mib", readAheadBytes>>20)
+		}
+	}
+	if err := tuning.validate(); err != nil {
+		slog.Error("invalid tcp settings", "err", err)
+		os.Exit(2)
+	}
 	if *esoundBufferMS < 20 || *esoundBufferMS > 2000 || *esoundSocketMS < 0 || *esoundSocketMS > 2000 {
 		slog.Error("esound-buffer-ms must be 20 to 2000 and esound-socket-ms 0 to 2000")
 		os.Exit(2)
 	}
-	if *upnpListen != "" && (*engine != "native" || !*localSourceControl) {
-		slog.Error("upnp-listen requires the native engine and local-source-control")
+	var rtpInterfaceConfig *net.Interface
+	if *rtpInterface != "" {
+		iface, err := net.InterfaceByName(*rtpInterface)
+		if err != nil {
+			slog.Error("rtp-interface", "err", err)
+			os.Exit(2)
+		}
+		rtpInterfaceConfig = iface
+	}
+	rtpInstance := rtp.NewInstance()
+	var rtpConfig *rtp.Config
+	if *rtpReceive {
+		if !*localSourceControl {
+			slog.Error("rtp-receive requires local-source-control")
+			os.Exit(2)
+		}
+		if *rtpBufferMS < 20 || *rtpBufferMS > 1000 {
+			slog.Error("rtp-buffer-ms must be 20 to 1000")
+			os.Exit(2)
+		}
+		rtpConfig = &rtp.Config{BufferMillis: *rtpBufferMS, Interface: rtpInterfaceConfig, Instance: rtpInstance}
+	}
+	var rtpGroup netip.AddrPort
+	if *rtpSend || *queueShare {
+		var err error
+		if *rtpSendGroup != "" {
+			rtpGroup, err = rtp.ParseGroup(*rtpSendGroup)
+		} else {
+			rtpGroup, err = rtp.RandomGroup()
+		}
+		if err != nil {
+			slog.Error("rtp-send-group", "err", err)
+			os.Exit(2)
+		}
+	}
+	if *upnpListen != "" && !*localSourceControl {
+		slog.Error("upnp-listen requires local-source-control")
 		os.Exit(2)
 	}
-	var irConfig irAmpConfig
-	var irAddressValue uint16
-	if *irDevice != "" {
-		if *volumeControl != "" {
-			slog.Error("ir-device and volume-control are alternatives")
-			os.Exit(2)
-		}
-		if *localListen == "" {
-			slog.Error("ir-device requires local-listen, which tracks whether audio is playing")
-			os.Exit(2)
-		}
-		address, err := strconv.ParseUint(*irAddress, 0, 16)
-		if err != nil {
-			slog.Error("ir-address must be a 16-bit number")
-			os.Exit(2)
-		}
-		irAddressValue = uint16(address)
-		irConfig = irAmpConfig{Sweep: *irSweep, IdleOff: *irIdleOff, Wake: *irWake, Repeat: *irRepeat,
-			InitialSteps: *irInitialSteps, MaxSteps: *irMaxSteps, StateFile: *irState}
-		for _, command := range []struct {
-			name, text string
-			value      *uint8
-		}{{"ir-volume-up", *irVolumeUp, &irConfig.VolumeUp}, {"ir-volume-down", *irVolumeDown, &irConfig.VolumeDown},
-			{"ir-power-on", *irPowerOn, &irConfig.PowerOn}, {"ir-power-off", *irPowerOff, &irConfig.PowerOff}} {
-			value, err := strconv.ParseUint(command.text, 0, 8)
-			if err != nil {
-				slog.Error("IR command must be an 8-bit number", "flag", command.name)
-				os.Exit(2)
-			}
-			*command.value = uint8(value)
-		}
-		if *irRepeat < 80*time.Millisecond || *irSweep <= 0 || *irIdleOff < time.Minute || *irWake < 0 || *irMaxSteps < 0 || *irInitialSteps < 0 {
-			slog.Error("invalid IR timing or steps: ir-repeat must be at least 80ms and ir-idle-off at least 1m")
-			os.Exit(2)
-		}
-	}
+
 	esoundPort := 0
 	if *esoundListen != "" {
 		_, port, err := net.SplitHostPort(*esoundListen)
@@ -220,18 +287,20 @@ func main() {
 			os.Exit(2)
 		}
 	}
+	configureOutboundHTTP(tuning)
 	ctx, stop := httpx.SignalContext()
 	defer stop()
 
-	inputs, err := inputDevices(*rotaryInput, []inputBinding{
-		{"button-input", *buttonInput, actionPlayPause, keyPlayPause},
-		{"previous-input", *previousInput, actionPrevious, keyPreviousSong},
-		{"next-input", *nextInput, actionNext, keyNextSong},
-		{"mute-input", *muteInput, actionMute, keyMute},
-	})
+	if *rotaryInput != "" {
+		inputSpecs = append(inputSpecs, *rotaryInput)
+	}
+	inputs, err := inputDevices(inputSpecs)
 	if err != nil {
 		slog.Error("configuring inputs", "err", err)
 		os.Exit(2)
+	}
+	if *rotaryInput != "" {
+		inputs[*rotaryInput].rotary = true
 	}
 	// Without a server the player only receives LAN sources.
 	server := strings.TrimRight(os.Getenv("SLOPIFY_SERVER"), "/")
@@ -239,6 +308,7 @@ func main() {
 		slog.Error("SLOPIFY_SERVER or -local-listen is required")
 		os.Exit(2)
 	}
+	setQueueSource(server)
 	hostname, _ := os.Hostname()
 	name := httpx.EnvOr("SLOPIFY_NAME", hostname)
 	token := ""
@@ -249,41 +319,47 @@ func main() {
 		}
 	}
 	c := &controller{
-		server: server, token: token, name: name, engineName: *engine, localEsoundPort: esoundPort, localState: *localState, localSourceControl: *localSourceControl, localAirPlay: *localAirPlay, localPulse: *localPulse,
-		updates:    make(chan *state, 16),
-		events:     make(chan event, 16),
-		knob:       make(chan knobEvent, 16),
-		buttons:    make(chan string, 8),
-		volumeWake: make(chan struct{}, 1),
+		server: server, token: token, name: name, localSettingsURL: *localSettingsURL, localSettingsPort: *localSettingsPort, localSSEInterval: *localSSEInterval, localEsoundPort: esoundPort, localState: *localState, localSourceControl: *localSourceControl, localAirPlay: *raopListen != "", localPulse: *localPulse, localRTP: *rtpReceive,
+		updates:               make(chan *state, 16),
+		events:                make(chan event, 16),
+		knob:                  make(chan knobEvent, 16),
+		buttons:               make(chan string, 8),
+		localPlaybackRequests: make(chan localPlaybackRequest),
+		volumeWake:            make(chan struct{}, 1),
 	}
-	services := playbackServices{queue: &c.queue, streamURL: c.streamURL, events: c.events, decodedState: func(f format, state string) { c.local.decodedState(f, state) }, formats: func(id uint64, input, output localPCM) {
+	if *queueShare {
+		c.link = newQueueLink(rtpInstance, *rtpSend)
+		if host, port, err := net.SplitHostPort(*localListen); err == nil {
+			ip := net.ParseIP(host)
+			if host == "" || (ip != nil && !ip.IsLoopback()) {
+				n, _ := strconv.ParseUint(port, 10, 16)
+				c.link.self.ControlPort = uint16(n)
+			}
+		}
+	}
+	services := playbackServices{queue: &c.queue, streamURL: c.streamURL, events: c.events, decodedState: func(state string) { c.local.decodedState(state) }, formats: func(id uint64, input, output localPCM) {
 		e := c.queue.entry(id)
 		c.local.nativeFormats(input, output, entryMetadata(&e))
-	}, peak: func(v float64, at time.Time) {
+	}, inputStats: func(input sourceInput) {
+		if c.local != nil && c.local.nativeSources != nil {
+			s := c.local.nativeSources
+			s.mu.Lock()
+			if p := s.source("slopify"); p != nil {
+				p.Input = &input
+			}
+			s.mu.Unlock()
+		}
+	}, peak: func(v uint32, at time.Time) {
 		if c.local != nil {
 			c.local.nativePeak("slopify", v, at)
 		}
 	}}
-	switch *engine {
-	case "mpv":
-		c.backend, err = newMPVBackend(services, httpx.EnvOr("SLOPIFY_MPV", "mpv"), sourceOutput)
-	case "native":
-		// mpv stays optional here: without it, other codecs fail visibly.
-		var fallback playbackBackend
-		if mpv, mpvErr := newMPVBackend(services, httpx.EnvOr("SLOPIFY_MPV", "mpv"), sourceOutput); mpvErr == nil {
-			fallback = mpv
-		} else {
-			slog.Info("native playback without mpv fallback", "reason", mpvErr)
-		}
-		c.backend, err = newNativeBackend(services, sourceOutput, fallback)
-	default:
-		err = fmt.Errorf("unknown playback engine %q", *engine)
-	}
+	backend, err := newNativeBackend(services, sourceOutput)
 	if err != nil {
-		slog.Error("configuring playback engine", "err", err)
+		slog.Error("configuring audio output", "err", err)
 		os.Exit(2)
 	}
-	defer c.backend.Close()
+	c.backend = backend
 	if *volumeControl != "" {
 		c.mixer, err = newMixer(ctx, *volumeCard, *volumeControl, *volumeMin, *volumeMax, *volumeInitial)
 		if err != nil {
@@ -292,11 +368,20 @@ func main() {
 		}
 	}
 	slog.Info("starting", "server", server, "name", name, "output", httpx.EnvOr("SLOPIFY_OUTPUT", "aplay:hw:0,0"))
-	if *irDevice != "" {
-		c.amp = newIRAmp(irConfig, &lirc.Transmitter{Path: *irDevice, Address: irAddressValue}, c.audioActive)
-		go c.amp.run(ctx)
-	}
+
+	resolvedInputs := map[string]*inputDevice{}
 	for path, device := range inputs {
+		resolved := inputPath("/sys/class/input", path)
+		if resolved == "" {
+			resolved = path
+		}
+		if previous := resolvedInputs[resolved]; previous != nil {
+			previous.rotary = previous.rotary || device.rotary
+		} else {
+			resolvedInputs[resolved] = device
+		}
+	}
+	for path, device := range resolvedInputs {
 		go followInput(ctx, path, device, c.knob)
 	}
 	if *localListen != "" {
@@ -306,17 +391,33 @@ func main() {
 		}
 	}
 
-	if *airplayMetadataListen != "" {
-		if err := c.startAirPlayMetadata(ctx, *airplayMetadataListen); err != nil {
-			slog.Error("AirPlay metadata", "err", err)
-			os.Exit(2)
+	if *rtpSend || *queueShare {
+		c.rtpSender = rtp.NewSender(rtp.SenderConfig{Name: name, Group: rtpGroup, Interface: rtpInterfaceConfig, Instance: rtpInstance, Control: c.link.controlPacket, OnControl: c.link.receiveControl})
+		backend.sender = c.rtpSender
+		if c.sources != nil {
+			c.rtpSender.SetSourceEligible(false)
 		}
+		if *queueShare && !*rtpSend {
+			c.rtpSender.SetEnabled(false)
+		}
+		registerRTPSenderMetrics(c.rtpSender)
+		c.rtpSender.Start(ctx)
+		slog.Info("rtp sender", "group", rtpGroup)
 	}
-	if c.engineName == "native" && c.sources != nil {
-		if err := c.startNativeSources(ctx, *pulseListen, *esoundListen, *pulseBufferMS, *esoundBufferMS, *esoundSocketMS, *upnpListen, httpx.EnvOr("SLOPIFY_PULSE_SINK", "slopify.hifiberry")); err != nil {
+	if c.sources != nil {
+		if err := c.startNativeSources(ctx, backend, *pulseListen, *esoundListen, *pulseBufferMS, *esoundBufferMS, *esoundSocketMS, *upnpListen, httpx.EnvOr("SLOPIFY_PULSE_SINK", "slopify.hifiberry"), rtpConfig); err != nil {
 			slog.Error("starting native sources", "err", err)
 			os.Exit(2)
 		}
+		if *raopListen != "" {
+			if err := c.startRAOP(ctx, *raopListen, *raopBufferMS, *raopKey); err != nil {
+				slog.Error("starting raop receiver", "err", err)
+				os.Exit(2)
+			}
+		}
+	}
+	if c.link != nil {
+		go c.pollQueuePeers(ctx)
 	}
 	if server != "" {
 		go c.follow(ctx, name)
@@ -353,26 +454,35 @@ func randomBytes(n int) []byte {
 }
 
 type controller struct {
-	engineName         string
-	sourcePause        chan sourcePauseIntent
-	localState         string
-	localPulse         bool
-	localEsoundPort    int
-	airplay            airplayMetadata
-	localAirPlay       bool
-	localSourceControl bool
-	sources            *speakerSources
-	name               string
-	local              *localStatus
-	mixer              *mixer
-	amp                *irAmp
-	knob               chan knobEvent
-	buttons            chan string
-	volumeWake         chan struct{}
-	server, token      string
-	backend            playbackBackend
-	updates            chan *state
-	events             chan event
+	localPlaybackRequests chan localPlaybackRequest
+	link                  *queueLink
+	sourcePause           chan sourcePauseIntent
+	localState            string
+	localPulse            bool
+	localRTP              bool
+	localEsoundPort       int
+	localSettingsURL      string
+	localSettingsPort     int
+	localSSEInterval      time.Duration
+	rtpSender             *rtp.Sender
+	localAirPlay          bool
+	nativeLAN             *nativeLAN
+	raopEncrypted         atomic.Bool
+	remoteCommands        chan remoteCommand
+	senderVolumes         chan senderVolumeRequest
+	senderVolumeAt        atomic.Int64
+	localSourceControl    bool
+	sources               *speakerSources
+	name                  string
+	local                 *localStatus
+	mixer                 *mixer
+	knob                  chan knobEvent
+	buttons               chan string
+	volumeWake            chan struct{}
+	server, token         string
+	backend               playbackBackend
+	updates               chan *state
+	events                chan event
 
 	outputRetryAt       time.Time
 	outputRetryDelay    time.Duration
@@ -427,9 +537,36 @@ func (c *controller) follow(ctx context.Context, name string) {
 	}
 }
 
-func (c *controller) stream(ctx context.Context, path string) (bool, error) {
+// The server pings every event stream every 20 seconds, so a longer silence
+// means the connection is dead, however long the kernel would keep retrying it.
+var eventStreamIdleTimeout = 60 * time.Second
+
+var errEventStreamIdle = errors.New("event stream silent, assuming a dead connection")
+
+// idleWatchReader pushes back the stream's deadline whenever bytes arrive.
+type idleWatchReader struct {
+	r     io.Reader
+	timer *time.Timer
+}
+
+func (w idleWatchReader) Read(p []byte) (int, error) {
+	n, err := w.r.Read(p)
+	if n > 0 {
+		w.timer.Reset(eventStreamIdleTimeout)
+	}
+	return n, err
+}
+
+func (c *controller) stream(parent context.Context, path string) (bool, error) {
+	ctx, cancel := context.WithCancelCause(parent)
+	defer cancel(nil)
+	watchdog := time.AfterFunc(eventStreamIdleTimeout, func() { cancel(errEventStreamIdle) })
+	defer watchdog.Stop()
 	resp, err := c.request(ctx, http.MethodGet, path, nil)
 	if err != nil {
+		if errors.Is(context.Cause(ctx), errEventStreamIdle) {
+			return false, errEventStreamIdle
+		}
 		return false, err
 	}
 	defer resp.Body.Close()
@@ -439,7 +576,7 @@ func (c *controller) stream(ctx context.Context, path string) (bool, error) {
 	}
 	slog.Info("connected")
 	c.reportVolume(ctx)
-	sc := bufio.NewScanner(resp.Body)
+	sc := bufio.NewScanner(idleWatchReader{r: resp.Body, timer: watchdog})
 	sc.Buffer(make([]byte, 64<<10), 64<<20) // a large queue is one event
 	event := ""
 	for sc.Scan() {
@@ -457,6 +594,9 @@ func (c *controller) stream(ctx context.Context, path string) (bool, error) {
 		}
 	}
 	if err := sc.Err(); err != nil {
+		if errors.Is(context.Cause(ctx), errEventStreamIdle) {
+			return true, errEventStreamIdle
+		}
 		return true, err
 	}
 	return true, errors.New("stream closed by server")
@@ -499,6 +639,7 @@ func (c *controller) run(ctx context.Context) {
 			c.reconcile(s)
 			c.requestSourcePause()
 		case <-volumeTick.C:
+			c.updateQueueLink()
 			c.requestSourcePause()
 			c.recoverOutput(time.Now())
 			if c.mixer != nil {
@@ -509,8 +650,16 @@ func (c *controller) run(ctx context.Context) {
 					c.reportVolume(ctx)
 				}
 			}
+		case req := <-c.localPlaybackRequests:
+			c.handleLocalPlayback(req)
 		case op := <-c.buttons:
 			if c.desired != nil && c.desired.Adopted {
+				if op == "play" || op == "pause" {
+					if (op == "play") == (c.desired.State == "playing") {
+						continue
+					}
+					op = "toggle"
+				}
 				reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 				resp, err := c.request(reqCtx, "POST", "/device/v1/control", map[string]any{"op": op, "version": c.desired.Version, "entry": c.desired.Current})
 				if err != nil {
@@ -525,10 +674,14 @@ func (c *controller) run(ctx context.Context) {
 			}
 
 		case e := <-c.events:
+			if c.link != nil && e.ended && e.session == c.sess {
+				c.link.ended(e.entry)
+			}
 			if e.ended && c.desired != nil && c.sess != nil && e.session == c.sess {
 				c.report(map[string]any{"version": c.desired.Version, "entry": e.entry, "state": "playing", "ended": true})
 			}
 		case <-tick.C:
+			c.reportQueueFollower()
 			if c.sess != nil && c.desired != nil && c.desired.State == "playing" {
 				c.report(map[string]any{"version": c.desired.Version, "entry": c.sess.current(), "state": "playing", "position": c.sess.position()})
 			}
@@ -538,6 +691,8 @@ func (c *controller) run(ctx context.Context) {
 
 // reconcile makes playback follow the output's state.
 func (c *controller) reconcile(s *state) {
+	announceStart := s.State == "playing" && (c.desired == nil || c.desired.State != "playing" || c.desired.Current != s.Current)
+	paused := c.desired != nil && c.desired.State == "playing" && s.State == "paused" && s.Adopted && c.desired.Current == s.Current
 	versionChanged := c.desired == nil || s.Version != c.applied
 	if c.desired == nil || versionChanged || s.State != c.desired.State || s.Current != c.desired.Current || s.Adopted != c.desired.Adopted {
 		slog.Info("playback command", "state", s.State, "entry", s.Current, "version", s.Version, "adopted", s.Adopted)
@@ -554,6 +709,7 @@ func (c *controller) reconcile(s *state) {
 			native.mu.Lock()
 			if p := native.source("slopify"); p != nil {
 				p.Paused, p.Playing = c.local.queuePaused, c.local.queuePlaying
+				p.Detached = s.Adopted && s.QueueGroup == ""
 			}
 			native.mu.Unlock()
 		}
@@ -565,15 +721,23 @@ func (c *controller) reconcile(s *state) {
 		}
 		c.local.mu.Unlock()
 	}
+	following := c.keepQueueFollower(s)
 	if !s.Adopted || e == nil || s.State != "playing" {
 		if c.sess != nil {
 			pos, cur := c.sess.position(), c.sess.current()
+			announce := paused && cur == s.Current && !c.sess.finished()
 			c.stop()
+			if announcer, ok := c.backend.(interface{ PauseSound() }); ok && announce {
+				announcer.PauseSound()
+			}
 			// Report where playback actually stopped, so resuming starts there.
 			if s.State == "paused" && cur == s.Current && versionChanged {
 				c.report(map[string]any{"version": s.Version, "entry": cur, "state": "paused", "position": pos})
 			}
 		}
+		return
+	}
+	if following {
 		return
 	}
 	if c.sess != nil && c.sess.finished() && c.sess.failure() && c.sess.current() == e.ID && !versionChanged {
@@ -584,9 +748,16 @@ func (c *controller) reconcile(s *state) {
 	case c.sess == nil || c.sess.finished() || c.sess.current() != e.ID:
 		c.outputRetryAt = time.Time{}
 		c.outputRetryDelay = 0
-		c.start(e.ID, s.Position)
+		if announcer, ok := c.backend.(interface {
+			StartAnnounced(uint64, float64) playbackSession
+		}); ok && announceStart {
+			c.stop()
+			c.sess = announcer.StartAnnounced(e.ID, s.Position)
+		} else {
+			c.start(e.ID, s.Position)
+		}
 	case versionChanged && math.Abs(c.sess.position()-s.Position) > 2:
-		c.start(e.ID, s.Position) // a seek
+		c.startSeek(e.ID, s.Position)
 	}
 }
 
@@ -629,6 +800,20 @@ func (c *controller) start(id uint64, at float64) {
 	c.sess = c.backend.Start(id, at)
 }
 
+// startSeek is start for a seek within the playing entry, which a backend may announce.
+func (c *controller) startSeek(id uint64, at float64) {
+	seeker, ok := c.backend.(interface {
+		StartSeek(uint64, float64) playbackSession
+	})
+	if !ok {
+		c.start(id, at)
+		return
+	}
+	c.stop()
+	slog.Info("seeking", "entry", id, "at", at)
+	c.sess = seeker.StartSeek(id, at)
+}
+
 func (c *controller) stop() {
 	if c.sess != nil {
 		c.sess.close()
@@ -667,18 +852,4 @@ func (c *controller) streamURL(ctx context.Context, id uint64) (string, error) {
 		return "", err
 	}
 	return c.server + v.URL, nil
-}
-
-func envDuration(name string, fallback time.Duration) time.Duration {
-	if value, err := time.ParseDuration(os.Getenv(name)); err == nil {
-		return value
-	}
-	return fallback
-}
-
-func envInt(name string, fallback int) int {
-	if value, err := strconv.Atoi(os.Getenv(name)); err == nil {
-		return value
-	}
-	return fallback
 }

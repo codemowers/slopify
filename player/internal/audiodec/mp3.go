@@ -1,13 +1,14 @@
+//go:build !no_mp3
+
 package audiodec
 
 import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
-	"math/big"
-	"sync"
 )
 
 // MPEG-1, 2 and 2.5 Layer III in Q28 fixed point: every audio calculation is
@@ -77,46 +78,6 @@ var (
 	}
 )
 
-// x^(4/3) = mantissa/2^32 * 2^exponent, computed once with integer arithmetic.
-var (
-	mp3PowOnce     sync.Once
-	mp3PowMantissa [8207]uint32
-	mp3PowExponent [8207]int8
-)
-
-func mp3InitPow() {
-	var n, y, y2, q, three, x4 big.Int
-	three.SetInt64(3)
-	for x := int64(1); x < int64(len(mp3PowMantissa)); x++ {
-		x4.SetInt64(x)
-		x4.Mul(&x4, &x4)
-		x4.Mul(&x4, &x4)
-		// Scale so that the cube root has at least 32 significant bits.
-		shift := uint(32 - x4.BitLen()/3)
-		n.Lsh(&x4, 3*shift)
-		y.Lsh(big.NewInt(1), uint(n.BitLen()/3+1))
-		for { // Integer Newton iteration converges down to the floor.
-			y2.Mul(&y, &y)
-			q.Quo(&n, &y2)
-			q.Add(&q, &y)
-			q.Add(&q, &y)
-			q.Quo(&q, &three)
-			if q.Cmp(&y) >= 0 {
-				break
-			}
-			y.Set(&q)
-		}
-		exponent := y.BitLen() - int(shift)
-		if extra := y.BitLen() - 32; extra > 0 {
-			y.Rsh(&y, uint(extra))
-		} else {
-			y.Lsh(&y, uint(-extra))
-		}
-		mp3PowMantissa[x] = uint32(y.Uint64())
-		mp3PowExponent[x] = int8(exponent)
-	}
-}
-
 // mp3Requantize returns is^(4/3) * 2^(exp/4) in Q28.
 func mp3Requantize(is, exp int) int32 {
 	negative := is < 0
@@ -145,7 +106,7 @@ func mp3Requantize(is, exp int) int32 {
 }
 
 type mp3Header struct {
-	version, rateIndex, sfTable  int // version: 0 MPEG-1, 1 MPEG-2, 2 MPEG-2.5
+	version, rateIndex           int // version: 0 MPEG-1, 1 MPEG-2, 2 MPEG-2.5
 	padding, protected           bool
 	mode, modeExt                int
 	rate, size, samples, channel int
@@ -261,18 +222,19 @@ type mp3Granule struct {
 }
 
 type mp3Decoder struct {
-	r       io.ReadSeeker
-	br      *bufio.Reader
-	start   int64 // first audio byte
-	format  Format
-	first   mp3Header
-	tag     mp3Tag
-	bitrate int
-	res     []byte
-	gr      [2][2]mp3Granule
-	overlap [2][32][18]int32
-	v       [2][1024]int32
-	voff    [2]int
+	inputBytes, inputFrames uint64
+	r                       io.ReadSeeker
+	br                      *bufio.Reader
+	start                   int64 // first audio byte
+	format                  Format
+	first                   mp3Header
+	tag                     mp3Tag
+	bitrate                 int
+	res                     []byte
+	gr                      [2][2]mp3Granule
+	overlap                 [2][32][18]int32
+	v                       [2][1024]int32
+	voff                    [2]int
 
 	skip, tail  int // gapless frames to drop at the start, and hold back at the end
 	out         []int32
@@ -280,11 +242,21 @@ type mp3Decoder struct {
 	discard     int // frames to decode silently
 	initialSkip int
 	frameIndex  int
+	frameAt     int64 // file offset of the frame nextFrame last returned
+
+	opts   Options
+	pos    int64 // file offset of the next byte d.br returns
+	sample int64 // approximate track position of the next frame, for reports
+
+	// Frame CRCs are optional. Some old encoders wrote ones that never match, so
+	// frames are concealed only once the file has proved its CRCs valid.
+	crcGood, crcBad int
+	crcIgnored      bool
+	concealed       *Issue // consecutive concealed frames, reported once they end
 }
 
-func openMP3(r io.ReadSeeker, audio int64) (Decoder, error) {
-	mp3PowOnce.Do(mp3InitPow)
-	d := &mp3Decoder{r: r, start: audio}
+func openMP3(r io.ReadSeeker, audio int64, opts Options) (Decoder, error) {
+	d := &mp3Decoder{r: r, start: audio, pos: audio, opts: opts}
 	if _, err := r.Seek(audio, io.SeekStart); err != nil {
 		return nil, err
 	}
@@ -308,6 +280,7 @@ func openMP3(r io.ReadSeeker, audio int64) (Decoder, error) {
 			d.initialSkip = tag.skip
 			d.br.Discard(h.size) // The tag frame carries no audio.
 			d.start += int64(h.size)
+			d.pos = d.start
 		}
 	}
 	return d, nil
@@ -363,8 +336,14 @@ func mp3ParseTag(h mp3Header, frame []byte) (tag mp3Tag, isTag bool) {
 
 func (d *mp3Decoder) Format() Format { return d.format }
 
+func (d *mp3Decoder) InputTotals() (uint64, uint64) { return d.inputBytes, d.inputFrames }
+
 // nextFrame finds a frame consistent with the stream, resynchronising if needed.
+// Bytes skipped between frames are reported, unless nothing follows them: tags
+// such as ID3v1 and APE commonly end a file.
 func (d *mp3Decoder) nextFrame(buf []byte) (mp3Header, []byte, error) {
+	from := d.pos
+	at := d.seconds()
 	for {
 		head, err := d.br.Peek(4)
 		if err != nil {
@@ -373,14 +352,27 @@ func (d *mp3Decoder) nextFrame(buf []byte) (mp3Header, []byte, error) {
 		h, ok := parseMP3Header(head)
 		if !ok || h.version != d.first.version || h.rateIndex != d.first.rateIndex || h.channel != d.first.channel {
 			d.br.Discard(1)
+			d.pos++
 			continue
 		}
 		frame := buf[:h.size]
-		if _, err := io.ReadFull(d.br, frame); err != nil {
+		n, err := io.ReadFull(d.br, frame)
+		d.pos += int64(n)
+		if err != nil {
+			d.opts.report(Issue{Codec: "MP3", Kind: IssueTruncated, At: at, Offset: d.pos - int64(n), Bytes: int64(n)})
 			return mp3Header{}, nil, io.EOF
 		}
+		d.frameAt = d.pos - int64(n)
+		if skipped := d.pos - int64(n) - from; skipped > 0 {
+			d.opts.report(Issue{Codec: "MP3", Kind: IssueResync, At: at, Offset: from, Bytes: skipped})
+		}
+		d.sample += int64(h.samples)
 		return h, frame, nil
 	}
+}
+
+func (d *mp3Decoder) seconds() float64 {
+	return max(float64(d.sample-int64(d.initialSkip)), 0) / float64(d.format.Rate)
 }
 
 func (d *mp3Decoder) Read(dst []int32) (int, error) {
@@ -390,10 +382,22 @@ func (d *mp3Decoder) Read(dst []int32) (int, error) {
 	for !d.eof && len(d.out)-tail < channels {
 		h, data, err := d.nextFrame(frame[:])
 		if err != nil {
+			d.flushConcealed()
 			d.eof = true
 			break
 		}
-		d.decodeFrame(h, data)
+		conceal := d.crcFailed(h, data)
+		if conceal {
+			if d.concealed == nil {
+				d.concealed = &Issue{Codec: "MP3", Kind: IssueChecksum, At: d.seconds() - float64(h.samples)/float64(d.format.Rate),
+					Offset: d.frameAt, Err: errors.New("mp3: frame CRC mismatch")}
+			}
+			d.concealed.Bytes += int64(len(data))
+			d.concealed.Missing += float64(h.samples) / float64(d.format.Rate)
+		} else {
+			d.flushConcealed()
+		}
+		d.decodeFrame(h, data, conceal)
 	}
 	available := len(d.out) - tail
 	if available < channels {
@@ -405,7 +409,60 @@ func (d *mp3Decoder) Read(dst []int32) (int, error) {
 	return n, nil
 }
 
-func (d *mp3Decoder) decodeFrame(h mp3Header, frame []byte) {
+// crcFailed checks a protected frame's CRC-16, which covers the last two header
+// bytes and the side information: what tells the decoder how to read the frame.
+func (d *mp3Decoder) crcFailed(h mp3Header, frame []byte) bool {
+	if !h.protected || d.crcIgnored || len(frame) < 6+h.sideSize {
+		return false
+	}
+	crc := mp3CRC(mp3CRC(0xFFFF, frame[2:4]), frame[6:6+h.sideSize])
+	if crc == uint16(frame[4])<<8|uint16(frame[5]) {
+		d.crcGood++
+		return false
+	}
+	d.crcBad++
+	if d.crcGood == 0 {
+		if d.crcBad >= mp3CRCTrial {
+			d.crcIgnored = true // the encoder's CRCs are wrong, not the audio
+		}
+		return false
+	}
+	return true
+}
+
+// mp3CRCTrial is how many leading CRC failures, with no success, mark a file's
+// CRCs as an encoder fault rather than damage.
+const mp3CRCTrial = 8
+
+// mp3CRC is CRC-16 with polynomial 0x8005, most significant bit first, as ISO
+// 11172-3 specifies; the caller starts it at 0xFFFF.
+func mp3CRC(crc uint16, data []byte) uint16 {
+	for _, b := range data {
+		crc ^= uint16(b) << 8
+		for range 8 {
+			if crc&0x8000 != 0 {
+				crc = crc<<1 ^ 0x8005
+			} else {
+				crc <<= 1
+			}
+		}
+	}
+	return crc
+}
+
+func (d *mp3Decoder) flushConcealed() {
+	if d.concealed != nil {
+		d.opts.report(*d.concealed)
+		d.concealed = nil
+	}
+}
+
+// decodeFrame decodes one frame. A concealed frame, whose side information is
+// unreliable, yields silence after the previous frame's overlap, while its main
+// data still joins the reservoir that later frames may begin in.
+func (d *mp3Decoder) decodeFrame(h mp3Header, frame []byte, conceal bool) {
+	d.inputBytes += uint64(len(frame))
+	d.inputFrames += uint64(h.samples)
 	side := frame[4:]
 	if h.protected {
 		side = side[2:]
@@ -439,7 +496,7 @@ func (d *mp3Decoder) decodeFrame(h mp3Header, frame []byte) {
 	}
 
 	main := side[h.sideSize:]
-	valid := len(d.res) >= mainBegin
+	valid := len(d.res) >= mainBegin && !conceal
 	var bs mp3Bits
 	if valid {
 		// The reservoir precedes this frame's main data in one contiguous buffer.
@@ -940,12 +997,26 @@ func (d *mp3Decoder) hybrid(gr *mp3Granule, ch int) {
 		clear(out[:])
 		if bt == 2 {
 			for w := 0; w < 3; w++ {
-				for p := 0; p < 12; p++ {
+				// Each half of the IMDCT has mirrored cosine columns. Negate
+				// the full accumulator before rounding to keep the old result exact.
+				for p := 0; p < 3; p++ {
 					var sum int64
 					for m := 0; m < 6; m++ {
 						sum += int64(in[w+3*m]) * int64(mp3Cos12[m][p])
 					}
 					out[6*w+p+6] += mp3Mul(int32((sum+1<<29)>>30), mp3Win[2][p])
+					q := 5 - p
+					out[6*w+q+6] += mp3Mul(int32((-sum+1<<29)>>30), mp3Win[2][q])
+				}
+				for p := 6; p < 9; p++ {
+					var sum int64
+					for m := 0; m < 6; m++ {
+						sum += int64(in[w+3*m]) * int64(mp3Cos12[m][p])
+					}
+					q := 17 - p
+					v := int32((sum + 1<<29) >> 30)
+					out[6*w+p+6] += mp3Mul(v, mp3Win[2][p])
+					out[6*w+q+6] += mp3Mul(v, mp3Win[2][q])
 				}
 			}
 		} else {
@@ -958,12 +1029,22 @@ func (d *mp3Decoder) hybrid(gr *mp3Granule, ch int) {
 			}
 			if nonzero {
 				win := &mp3Win[bt]
-				for p := 0; p < 36; p++ {
+				for p := 0; p < 9; p++ {
 					var sum int64
 					for m := 0; m < 18; m++ {
 						sum += int64(in[m]) * int64(mp3Cos36[m][p])
 					}
 					out[p] = mp3Mul(int32((sum+1<<29)>>30), win[p])
+					out[17-p] = mp3Mul(int32((-sum+1<<29)>>30), win[17-p])
+				}
+				for p := 18; p < 27; p++ {
+					var sum int64
+					for m := 0; m < 18; m++ {
+						sum += int64(in[m]) * int64(mp3Cos36[m][p])
+					}
+					v := int32((sum + 1<<29) >> 30)
+					out[p] = mp3Mul(v, win[p])
+					out[53-p] = mp3Mul(v, win[53-p])
 				}
 			}
 		}
@@ -989,13 +1070,27 @@ func (d *mp3Decoder) synthesis(g, channels int) {
 		off := d.voff[ch]
 		for ss := 0; ss < 18; ss++ {
 			off = (off - 64) & 1023
-			for i := 0; i < 64; i++ {
+			dst := v[off : off+64]
+			// Row 16 is zero; rows 17..32 negate rows 15..0, and
+			// rows 49..63 repeat rows 47..33. Only 32 dot products remain.
+			dst[16] = 0
+			for i := 0; i < 16; i++ {
 				var sum int64
 				row := &mp3Synth[i]
 				for j := 0; j < 32; j++ {
 					sum += int64(lines[j*18+ss]) * int64(row[j])
 				}
-				v[(off+i)&1023] = int32((sum + 1<<29) >> 30)
+				dst[i] = int32((sum + 1<<29) >> 30)
+				dst[32-i] = int32((-sum + 1<<29) >> 30)
+			}
+			for i := 33; i <= 48; i++ {
+				var sum int64
+				row := &mp3Synth[i]
+				for j := 0; j < 32; j++ {
+					sum += int64(lines[j*18+ss]) * int64(row[j])
+				}
+				dst[i] = int32((sum + 1<<29) >> 30)
+				dst[96-i] = dst[i]
 			}
 			for i := 0; i < 32; i++ {
 				var sum int64
@@ -1035,6 +1130,7 @@ func (d *mp3Decoder) Seek(seconds float64) (float64, error) {
 			return 0, err
 		}
 		d.br.Reset(d.r)
+		d.pos, d.sample = d.start, 0
 		target := int64(seconds*float64(rate)) + int64(d.initialSkip)
 		d.discard = int(target / samples)
 		d.skip = int(target % samples)
@@ -1061,7 +1157,10 @@ func (d *mp3Decoder) Seek(seconds float64) (float64, error) {
 	}
 	d.br.Reset(d.r)
 	d.discard, d.skip = mp3Preroll, 0
-	return d.secondsAt(start-d.start, size) + frameSeconds*mp3Preroll, nil
+	landed := d.secondsAt(start-d.start, size) + frameSeconds*mp3Preroll
+	d.pos = start
+	d.sample = int64((landed-frameSeconds*mp3Preroll)*float64(rate)) + int64(d.initialSkip)
+	return landed, nil
 }
 
 func (d *mp3Decoder) duration() float64 {
@@ -1109,4 +1208,65 @@ func (d *mp3Decoder) secondsAt(offset, size int64) float64 {
 		return (float64(i) + fraction) / 100 * d.duration()
 	}
 	return 0
+}
+
+const mp3Enabled = true
+
+const (
+	mp3ScanLimit = 1 << 20 // bytes searched for the first frame after any tags
+	mp3ScanStep  = 64 << 10
+	mp3ScanMatch = 3 // consecutive consistent frames that identify a real start
+)
+
+// findMP3Start scans for consecutive Layer III frames, tolerating padding or junk
+// between tags and audio. It reads only as far as it needs.
+func findMP3Start(r io.ReadSeeker, from int64) (int64, error) {
+	if _, err := r.Seek(from, io.SeekStart); err != nil {
+		return 0, err
+	}
+	var buf []byte
+	atEnd := false
+	for pos := 0; pos < mp3ScanLimit; pos++ {
+		// Enough for the longest run of frames being checked.
+		for !atEnd && len(buf) < pos+mp3ScanMatch*2048 {
+			chunk := make([]byte, mp3ScanStep)
+			n, err := io.ReadFull(r, chunk)
+			buf = append(buf, chunk[:n]...)
+			atEnd = err != nil
+		}
+		if pos+4 > len(buf) {
+			break
+		}
+		if mp3FramesAt(buf, pos) {
+			return from + int64(pos), nil
+		}
+	}
+	return 0, ErrUnsupported
+}
+
+func mp3FramesAt(buf []byte, pos int) bool {
+	first, ok := parseMP3Header(buf[pos:])
+	if !ok {
+		return false
+	}
+	at := pos
+	for range mp3ScanMatch {
+		if at+4 > len(buf) {
+			return at > pos // Very short file: what exists was consistent.
+		}
+		h, ok := parseMP3Header(buf[at:])
+		if !ok || h.version != first.version || h.rateIndex != first.rateIndex || h.channel != first.channel {
+			return false
+		}
+		at += h.size
+	}
+	return true
+}
+
+func openMP3Original(r io.ReadSeeker, audio int64, opts Options) (Decoder, error) {
+	start, err := findMP3Start(r, audio)
+	if err != nil {
+		return nil, err
+	}
+	return openMP3(r, start, opts)
 }

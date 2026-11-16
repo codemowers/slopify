@@ -44,6 +44,9 @@ func TestOpenStreamRejectsBadLPCM(t *testing.T) {
 }
 
 func TestOpenStreamWAVWithEndlessDataChunk(t *testing.T) {
+	if !wavEnabled {
+		t.Skip("decoder disabled")
+	}
 	for _, magic := range []string{"RIFF", "RF64"} {
 		var w bytes.Buffer
 		w.WriteString(magic)

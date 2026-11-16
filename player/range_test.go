@@ -14,7 +14,7 @@ import (
 )
 
 func newTestRangeSource(url string) *rangeSource {
-	return &rangeSource{url: url, client: &http.Client{Timeout: 20 * time.Second}, blocks: make(map[int64][]byte)}
+	return newRangeSource(url, &http.Client{Timeout: 20 * time.Second})
 }
 
 func TestSourceReaderBoundedRangesAndConnectionReuse(t *testing.T) {
@@ -78,5 +78,55 @@ func TestRangeSourceRejectsInvalidOrTruncatedRange(t *testing.T) {
 		if err == nil {
 			t.Fatal("invalid range accepted", body)
 		}
+	}
+}
+
+func TestReadAheadDownloadsToEndWithinBudget(t *testing.T) {
+	data := bytes.Repeat([]byte("0123456789abcdef"), 3*sourceBlockSize) // 6 MiB: 48 blocks
+	var requests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("ETag", `"v1"`)
+		http.ServeContent(w, r, "track.flac", time.Time{}, bytes.NewReader(data))
+	}))
+	defer upstream.Close()
+
+	// A budget smaller than the file: the downloader stops until the reader moves on.
+	budget := newReadAheadBudget(2 << 20)
+	source := newTestRangeSource(upstream.URL)
+	if _, err := source.block(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	source.startReadAhead(budget)
+	deadline := time.Now().Add(5 * time.Second)
+	for budget.inUse() < budget.limit-readAheadRequestBlocks*sourceBlockSize && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case <-source.complete:
+		t.Fatal("complete before the end was downloaded")
+	default:
+	}
+	if budget.inUse() > budget.limit {
+		t.Fatalf("budget exceeded: %d > %d", budget.inUse(), budget.limit)
+	}
+	before := requests.Load()
+	reader := &sourceReader{source: source, ctx: context.Background()}
+	got, err := io.ReadAll(reader)
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatal("read-ahead data mismatch", err)
+	}
+	select {
+	case <-source.complete:
+	case <-time.After(5 * time.Second):
+		t.Fatal("read-ahead never completed")
+	}
+	// Background requests carry up to 1 MiB each; the reader barely fetched itself.
+	if n := requests.Load(); n > before+int32(len(data)/(readAheadRequestBlocks*sourceBlockSize))+4 {
+		t.Fatalf("too many requests: %d", n)
+	}
+	source.close()
+	if budget.inUse() != 0 {
+		t.Fatalf("closing kept %d bytes charged", budget.inUse())
 	}
 }

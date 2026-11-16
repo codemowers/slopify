@@ -1,4 +1,12 @@
 const $ = (id) => document.getElementById(id);
+// Keep the sticky amplifier below the speaker heading, including wrapped names.
+const speakerHeader = document.querySelector('main > header');
+function measureSpeakerHeader() {
+ document.documentElement.style.setProperty('--speaker-header-height', `${Math.ceil(speakerHeader.getBoundingClientRect().height)}px`);
+}
+if (typeof ResizeObserver !== 'undefined') new ResizeObserver(measureSpeakerHeader).observe(speakerHeader);
+else window.addEventListener('resize', measureSpeakerHeader);
+measureSpeakerHeader();
 function toast(message) { $("toast").textContent = message; }
 const lanAudioTemplates = new Map(["lan-audio-connect", "lan-audio-direct", "lan-audio-persist", "lan-audio-check"]
   .map((id) => [id, $(id).textContent]));
@@ -86,6 +94,12 @@ function renderPCM(element, format, prefix="", suffix="") {
   if(format.channels)parts.push(document.createTextNode(`${format.channels}ch · `));
   const lossy=format.codec&&!format.format;
   parts.push(document.createTextNode(format.rate?`${format.rate/1000}kHz${lossy?"":" · "}`:"rate unknown · "));
+  if(lossy && format.decodedBits) {
+   const label=document.createElement("span");
+   label.textContent=` · ${format.decodedBits}-bit decoded`;
+   label.title="Decoder output precision; not the original recording's bit depth. Compare with the amplifier output format to see any reduction.";
+   parts.push(label);
+  }
   if(!lossy) {
    const label=document.createElement("span");
    label.textContent=pcmLabel(format.format)||"format unknown";
@@ -105,50 +119,40 @@ function speakerConnected() { $("connection").textContent = "";$("connection").h
 function speakerDisconnected() { $("connection").hidden=false;$("connection").textContent = "Speaker connection lost; reconnecting…"; }
 function connectSpeakerEvents() {
  if (document.readyState !== "complete" || events) return;
- if (typeof SharedWorker !== "undefined") {
-  try {
-   const worker = new SharedWorker("/events-worker.js", {name:"slopify-speaker-events"});
-   const shared = {close() { worker.port.postMessage({type:"disconnect"});worker.port.close(); }};
-   events = shared;
-   worker.port.onmessage = event => {
-    if (events !== shared) return;
-    if (event.data.type === "open") speakerConnected();
-    else if (event.data.type === "error") speakerDisconnected();
-    else if (event.data.type === "status") renderSpeakerEvent({data:event.data.data});
-   };
-   worker.onerror = () => {
-    if (events !== shared) return;
-    closeSpeakerEvents();connectDirectSpeakerEvents();
-   };
-   worker.port.start();
-   return;
-  } catch (_) { /* Unsupported worker policy: use a tab-local connection. */ }
- }
- connectDirectSpeakerEvents();
-}
-function connectDirectSpeakerEvents() {
- if (events) return;
  const stream = new EventSource("/api/events");
  events = stream;
  stream.onopen = speakerConnected;
  stream.onerror = speakerDisconnected;
- stream.onmessage = renderSpeakerEvent;
+ stream.addEventListener("evicted", () => {
+  stream.close();
+  $("connection").hidden=false;
+  $("connection").textContent="This status stream was replaced by a newer viewer. Reload to reconnect.";
+ });
+ const status = new SpeakerStatus();
+ stream.onmessage = event => renderSpeakerState(status.apply(JSON.parse(event.data)));
 }
-function renderSpeakerEvent(event) {
- const state = JSON.parse(event.data);
+function renderSpeakerState(state) {
+ $("hardware-description").textContent=state.hardware || "";
+ $("hardware-description").hidden=!state.hardware;
+ renderSiblings(state.siblings || []);
+ renderDeviceSettings(state.settingsUrl, state.settingsPort);
+ queueLink=state.queueLink || null;
  sourceClock = Date.parse(state.now) || Date.now();
  const pulseEnabled=state.pulseEnabled!==false,airplayEnabled=!!state.airplayEnabled;
  $("tab-airplay").hidden=!airplayEnabled;
+ $("raop-apple-off").hidden=!airplayEnabled||!!state.airplayEncrypted;
  $("tab-zeroconf").hidden=!pulseEnabled;
  $("tab-fixed").hidden=!pulseEnabled;
+ $("tab-rtp").hidden=!state.rtpEnabled;
  $("tab-esound").hidden=!esoundUsable(state.esoundPort);
  const availableTabs=senderTabs.filter(t=>!t.hidden);
  if(senderTabs.some(t=>t.hidden&&t.getAttribute("aria-selected")==="true")) {
   if(availableTabs.length)selectSenderTab(availableTabs[0]);
   else for(const tab of senderTabs)$(tab.getAttribute("aria-controls")).hidden=true;
  }
- $("sender-intro").textContent=pulseEnabled&&airplayEnabled?"Ubuntu 24.04/26.04 can send through Pulse TCP or AirPlay/RAOP. Macs, iPhones and iPads use AirPlay. Keep sender and speaker on the same reachable LAN.":airplayEnabled?"Send audio using AirPlay/RAOP. Keep sender and speaker on the same reachable LAN.":pulseEnabled?"Ubuntu 24.04/26.04 can send through Pulse TCP. Keep sender and speaker on a reachable network.":"LAN audio receivers are disabled in this deployment.";
+ $("sender-intro").textContent=availableTabs.length?"Choose a connection method below to send audio from your laptop or phone.":"LAN audio receivers are disabled in this deployment.";
  slopifyServerHost=state.serverHost || "";
+ slopifyServerOrigin=state.serverOrigin || "";
  $("output-device").hidden=!state.outputDevice;
  $("output-device").textContent=state.outputDevice?.path || "";
  $("output-name").textContent=state.outputDevice?.name || "Amplifier";
@@ -163,7 +167,9 @@ function renderSpeakerEvent(event) {
  const volumeParent = state.sourceControl ? $("source-output") : $("volume-fallback");
  if ($("hardware-volume").parentElement !== volumeParent) volumeParent.append($("hardware-volume"));
  renderVolume(v);
- renderAmp(state.amp);
+ const multicastParent = state.sourceControl ? $("source-outputs") : $("standalone-output");
+ if ($("source-multicast").parentElement !== multicastParent) multicastParent.append($("source-multicast"));
+ renderMulticast(state.multicast);
  $("volume").textContent = v ? `Hardware volume: ${v.muted ? "−∞ dB" : v.db == null ? "dB unavailable" : `${v.db.toFixed(1)} dB`}` : "Hardware volume control disabled";
  $("status-error").textContent = state.error || "";
  $("status-error").hidden = !state.error;
@@ -189,21 +195,6 @@ function renderSpeakerEvent(event) {
 
 let currentVolume = null, pendingVolume = null, volumeSending = false, volumeEditing = false;
 function dbText(step) { return step?.muted ? "−∞ dB" : step?.db == null ? "dB unavailable" : `${step.db.toFixed(1)} dB`; }
-function renderAmp(amp) {
- let box=$("amp-control");
- if(!amp) { if(box)box.hidden=true; return; }
- if(!box) {
-  box=document.createElement("div");box.id="amp-control";
-  const label=document.createElement("span");label.id="amp-steps";
-  const step=(text,name,delta)=>{const b=document.createElement("button");b.type="button";b.textContent=text;b.setAttribute("aria-label",name);
-   b.addEventListener("click",()=>fetch("/api/amp",{method:"POST",headers:{"Content-Type":"application/json","X-Slopify-Control":"1"},body:JSON.stringify({delta})}).catch(()=>{}));return b;};
-  box.append(step("−","Amplifier volume down",-1),label,step("+","Amplifier volume up",1));
-  $("source-output").append(box);
- }
- box.hidden=false;
- $("amp-steps").textContent=amp.phase==="unknown"?" Amp volume: level unknown ":` Amp volume: step ${amp.steps} of ${amp.maxSteps} `;
-}
-
 function renderVolume(v) {
  currentVolume = v;
  $("hardware-volume").hidden = !v;
@@ -250,3 +241,32 @@ window.addEventListener("load", connectSpeakerEvents, {once:true});
 window.addEventListener("pagehide", closeSpeakerEvents);
 window.addEventListener("pageshow", connectSpeakerEvents);
 connectSpeakerEvents();
+
+function renderDeviceSettings(url, port) {
+ const link=document.getElementById('device-settings');
+ link.hidden=true;link.removeAttribute('href');
+ if(!url)return;
+ try {
+  const target=new URL(url,location.href);
+  if(!['http:','https:'].includes(target.protocol) || target.username || target.password)return;
+  if(port)target.port=String(port);
+  link.href=target.href;link.hidden=false;
+ } catch {}
+}
+let siblingKey='';
+function renderSiblings(peers) {
+ const key=JSON.stringify(peers);if(key===siblingKey)return;siblingKey=key;
+ const nav=document.getElementById('sibling-players');nav.hidden=!peers.length;
+ const label=document.createElement('span');label.className='muted';label.textContent='Other players';
+ const links=[];
+ for(const peer of peers){
+  let url;try{url=new URL(peer.url);}catch(_){continue;}
+  if(url.protocol!=='http:' || url.username || url.password)continue;
+  const a=document.createElement('a');a.href=url.href;a.target='_blank';a.rel='noopener noreferrer';a.textContent=peer.name;links.push(a);
+ }
+ nav.replaceChildren(label,...links);nav.hidden=!links.length;
+}
+
+const playerMenu=document.getElementById('player-menu');
+document.addEventListener('pointerdown',event=>{if(playerMenu.open && !playerMenu.contains(event.target))playerMenu.open=false;});
+document.addEventListener('keydown',event=>{if(event.key==='Escape' && playerMenu.open){playerMenu.open=false;playerMenu.querySelector('summary').focus();}});

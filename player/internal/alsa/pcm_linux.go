@@ -7,11 +7,15 @@ package alsa
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"unsafe"
 
+	"github.com/codemowers/slopify/player/internal/cleantext"
+	"github.com/codemowers/slopify/player/internal/linuxioctl"
 	"golang.org/x/sys/unix"
 )
 
@@ -49,7 +53,7 @@ type interval struct {
 }
 
 // These mirror the UAPI structures; uintptr matches the kernel's unsigned long
-// on both 32-bit and 64-bit ARM.
+// on 32-bit and 64-bit Linux.
 type hwParams struct {
 	flags     uint32
 	masks     [3]mask
@@ -88,7 +92,7 @@ type xferi struct {
 	frames uintptr
 }
 
-func ioc(dir, nr, size uintptr) uintptr { return dir<<30 | size<<16 | 'A'<<8 | nr }
+func ioc(dir, nr, size uintptr) uintptr { return linuxioctl.Request(dir, 'A', nr, size) }
 
 var (
 	iocHwRefine = ioc(3, 0x10, unsafe.Sizeof(hwParams{}))
@@ -152,16 +156,57 @@ func Describe(spec string) (Device, error) {
 		return Device{}, err
 	}
 	d := Device{Path: fmt.Sprintf("/dev/snd/pcmC%dD%dp", card, device)}
+	if parent, err := filepath.EvalSymlinks(fmt.Sprintf("/sys/class/sound/card%d/device", card)); err == nil {
+		d.Name = usbOutputName(parent)
+	}
 	info, err := os.ReadFile(fmt.Sprintf("/proc/asound/card%d/pcm%dp/info", card, device))
 	if err != nil {
 		return d, nil
 	}
 	for _, line := range strings.Split(string(info), "\n") {
-		if name, ok := strings.CutPrefix(line, "name: "); ok {
-			d.Name = name
+		if name, ok := strings.CutPrefix(line, "name: "); ok && d.Name == "" {
+			d.Name = cleantext.Line(name, 160)
 		}
 	}
 	return d, nil
+}
+
+// Walk only the selected ALSA card's ancestry, never the global USB inventory.
+// Interface parents lead to the USB device holding manufacturer/product strings.
+func usbOutputName(parent string) string {
+	read := func(name string) string {
+		f, err := os.Open(filepath.Join(parent, name))
+		if err != nil {
+			return ""
+		}
+		defer f.Close()
+		data, err := io.ReadAll(io.LimitReader(f, 4097))
+		if err != nil || len(data) > 4096 {
+			return ""
+		}
+		return cleantext.Line(string(data), 120)
+	}
+	for range 8 {
+		if read("idVendor") != "" && read("idProduct") != "" {
+			manufacturer, product := read("manufacturer"), read("product")
+			if manufacturer == "" {
+				return product
+			}
+			if product == "" {
+				return manufacturer
+			}
+			if strings.HasPrefix(strings.ToLower(product), strings.ToLower(manufacturer)) {
+				return product
+			}
+			return manufacturer + " " + product
+		}
+		next := filepath.Dir(parent)
+		if next == parent {
+			break
+		}
+		parent = next
+	}
+	return ""
 }
 
 func ParseDevice(spec string) (card, device int, err error) {

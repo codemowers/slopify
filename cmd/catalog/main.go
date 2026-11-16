@@ -52,6 +52,8 @@ type Item struct {
 	Disc        int        `json:"disc,omitempty"`
 	Tagged      bool       `json:"tagged"`
 	Confidence  float64    `json:"confidence"`
+	// Credits are only returned for a single item.
+	Credits *sidecar.Credits `json:"credits,omitempty"`
 
 	haystack string
 }
@@ -81,6 +83,7 @@ type index struct {
 	all      []Item
 	albums   []Album
 	artists  []Artist
+	credits  map[string]*sidecar.Credits // by path, only tagged files
 }
 
 type catalog struct {
@@ -260,7 +263,7 @@ func (c *catalog) batch(ctx context.Context) {
 
 // rebuild derives a new index from c.dirs; callers hold c.mu.
 func (c *catalog) rebuild() {
-	ix := &index{items: map[string][]Item{}, children: map[string][]Dir{}}
+	ix := &index{items: map[string][]Item{}, children: map[string][]Dir{}, credits: map[string]*sidecar.Credits{}}
 	seen := map[string]bool{".": true}
 	for dir, s := range c.dirs {
 		for p := dir; !seen[p]; p = path.Dir(p) {
@@ -282,6 +285,9 @@ func (c *catalog) rebuild() {
 				Title: d.Title, Artist: d.Artist, AlbumArtist: d.AlbumArtist, Album: d.Album,
 				Genre: d.Genre, Year: d.Year, Track: d.Track, Disc: d.Disc,
 				Tagged: e.Tags != nil && (e.Kind != media.Video || (e.TagSource == "container" && e.Tags.Title != "" && !media.TechnicalVideoTitle(e.Tags.Title))), Confidence: e.Confidence,
+			}
+			if e.Credits != nil {
+				ix.credits[p] = e.Credits
 			}
 			if it.Tagged {
 				it.Confidence = 1
@@ -467,8 +473,10 @@ func (c *catalog) item(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	for _, it := range c.index.Load().items[path.Dir(p)] {
+	ix := c.index.Load()
+	for _, it := range ix.items[path.Dir(p)] {
 		if it.Path == p {
+			it.Credits = ix.credits[p]
 			httpx.JSON(w, it)
 			return
 		}

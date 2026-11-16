@@ -8,13 +8,13 @@ import (
 )
 
 type Config struct {
-	Pulse, AirPlay bool
-	Name           string
+	Pulse bool
+	Name  string
 }
 
 func FromEnv() (Config, error) {
 	c := Config{Pulse: true, Name: os.Getenv("SLOPIFY_NAME")}
-	for key, dst := range map[string]*bool{"SLOPIFY_PULSE_ENABLED": &c.Pulse, "SLOPIFY_AIRPLAY_ENABLED": &c.AirPlay} {
+	for key, dst := range map[string]*bool{"SLOPIFY_PULSE_ENABLED": &c.Pulse} {
 		if value := os.Getenv(key); value != "" {
 			parsed, err := strconv.ParseBool(value)
 			if err != nil {

@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -189,7 +191,7 @@ func TestNativeRemembersUndecodableEntry(t *testing.T) {
 	s := b.Start(1, 0)
 	<-s.(*session).done
 	if !s.failure() || b.handles(1) {
-		t.Fatal("undecodable entry should fail and then route to the fallback")
+		t.Fatal("undecodable entry should fail and be remembered as unsupported")
 	}
 }
 
@@ -197,18 +199,18 @@ func TestNativeInputShowsCodec(t *testing.T) {
 	if got := nativeInputPCM(format{44100, 2, 16}, "FLAC", false); got.Codec != "FLAC" || got.Format != "S16_LE" {
 		t.Fatalf("%+v", got)
 	}
-	if got := nativeInputPCM(format{44100, 2, 24}, "MP3", true); got.Codec != "MP3" || got.Format != "" {
+	if got := nativeInputPCM(format{44100, 2, 24}, "MP3", true); got.Codec != "MP3" || got.Format != "" || got.DecodedBits != 24 {
 		t.Fatalf("lossy source reported a sample format: %+v", got)
 	}
 }
 
 func TestNativePeaksAreEvenlySpacedDespiteBurstyWrites(t *testing.T) {
 	type window struct {
-		peak float64
+		peak uint32
 		at   time.Time
 	}
 	var got []window
-	p := nativePeaks{report: func(v float64, at time.Time) { got = append(got, window{v, at}) }}
+	p := nativePeaks{report: func(v uint32, at time.Time) { got = append(got, window{v, at}) }}
 	f := format{rate: 5000, channels: 2}
 	samples := make([]int32, 2600) // Not a whole number of windows.
 	samples[10] = -1 << 31
@@ -222,7 +224,7 @@ func TestNativePeaksAreEvenlySpacedDespiteBurstyWrites(t *testing.T) {
 		t.Fatalf("released %d windows before they were heard", len(got))
 	}
 	p.release(start.Add(time.Hour))
-	if len(got) < 4 || got[0].peak < 0.99 {
+	if len(got) < 4 || got[0].peak != 1<<31 {
 		t.Fatalf("%+v", got)
 	}
 	for i := 1; i < len(got); i++ {
@@ -284,10 +286,10 @@ func TestNativeRoutesByCodec(t *testing.T) {
 }
 
 func TestNativeFormatsNeverReducePrecision(t *testing.T) {
-	if fmt.Sprint(nativeFormats(32)) != fmt.Sprint([]int{alsa.FormatS32LE}) {
+	if fmt.Sprint(nativeFormats(32, false)) != fmt.Sprint([]int{alsa.FormatS32LE}) {
 		t.Fatal("32-bit source must not narrow")
 	}
-	if got := nativeFormats(24); len(got) != 3 {
+	if got := nativeFormats(24, false); len(got) != 3 {
 		t.Fatalf("%v", got)
 	}
 	if got := packSamples(nil, []int32{0x12345600}, alsa.FormatS243LE); !bytes.Equal(got, []byte{0x56, 0x34, 0x12}) {
@@ -299,7 +301,7 @@ func TestNativeFormatsNeverReducePrecision(t *testing.T) {
 }
 
 func TestNewNativeBackendRefusesPipeWire(t *testing.T) {
-	if _, err := newNativeBackend(playbackServices{}, "pipewire:x", nil); err == nil {
+	if _, err := newNativeBackend(playbackServices{}, "pipewire:x"); err == nil {
 		t.Fatal("PipeWire is not implemented by the native engine")
 	}
 }
@@ -323,7 +325,7 @@ func BenchmarkPackSamplesS32(b *testing.B) {
 
 func TestPeakTimelineFollowsClockSteps(t *testing.T) {
 	var got []time.Time
-	p := nativePeaks{report: func(_ float64, at time.Time) { got = append(got, at) }}
+	p := nativePeaks{report: func(_ uint32, at time.Time) { got = append(got, at) }}
 	f := format{rate: 48000, channels: 2}
 	samples := make([]int32, 2*48000/5)
 	start := time.Now() // carries a monotonic reading, as real calls do
@@ -334,6 +336,92 @@ func TestPeakTimelineFollowsClockSteps(t *testing.T) {
 		p.add(samples, f, 0, now)
 		if len(got) != 1 || got[0].Sub(now.Round(0)).Abs() > nativePeakResync {
 			t.Fatalf("step %v: stamps %v, clock %v", step, got, now)
+		}
+	}
+}
+
+// The next original is downloaded only once the current one is complete, and the
+// decoder then uses that download rather than opening the entry again.
+func TestNativeReadAheadPreparesNextAfterCurrentDownloaded(t *testing.T) {
+	files := map[uint64][]byte{1: wavFile(44100, 1<<20, 0), 2: wavFile(44100, 20000, 1<<24)} // 4 MiB, then small
+	var mu sync.Mutex
+	var log []string
+	b, _, samples, events := nativeHarness(t, files, []entry{{ID: 1}, {ID: 2}}, 0)
+	inner := b.client.Transport
+	b.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		mu.Lock()
+		log = append(log, r.URL.Path+" "+r.Header.Get("Range"))
+		mu.Unlock()
+		return inner.RoundTrip(r)
+	})}
+	b.readAhead = newReadAheadBudget(64 << 20)
+	s := b.Start(1, 0)
+	for ended := 0; ended < 2; {
+		select {
+		case <-events:
+			ended++
+		case <-time.After(10 * time.Second):
+			t.Fatal("playback did not finish")
+		}
+	}
+	s.close()
+	if len(*samples) != 1<<20+20000 {
+		t.Fatalf("%d samples", len(*samples))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	lastFirst, firstSecond, secondStarts := -1, -1, 0
+	for i, l := range log {
+		if strings.HasPrefix(l, "/1 ") {
+			lastFirst = i
+		}
+		if strings.HasPrefix(l, "/2 ") && firstSecond < 0 {
+			firstSecond = i
+		}
+		if strings.HasPrefix(l, "/2 bytes=0-") {
+			secondStarts++
+		}
+	}
+	if firstSecond < lastFirst {
+		t.Fatalf("next track fetched before the current finished downloading: %v", log)
+	}
+	if secondStarts != 1 {
+		t.Fatalf("next track opened %d times: %v", secondStarts, log)
+	}
+	if b.readAhead.inUse() != 0 {
+		t.Fatalf("read-ahead still holds %d bytes", b.readAhead.inUse())
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestNativeFormatsTruncationIsLastResort(t *testing.T) {
+	for _, bits := range []int{16, 24, 32} {
+		strict := nativeFormats(bits, false)
+		allowed := nativeFormats(bits, true)
+		want := append([]int(nil), strict...)
+		if bits > 16 {
+			want = append(want, alsa.FormatS16LE)
+		}
+		if fmt.Sprint(allowed) != fmt.Sprint(want) {
+			t.Fatalf("%d bits: got %v, want %v", bits, allowed, want)
+		}
+	}
+	samples := []int32{0x12345678, -1, -2147483648, 2147483647}
+	got := packSamples(nil, samples, alsa.FormatS16LE)
+	want := []byte{0x34, 0x12, 0xff, 0xff, 0, 0x80, 0xff, 0x7f}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("truncated samples %x, want %x", got, want)
+	}
+}
+
+func TestNativeSourceFramesOn32Bit(t *testing.T) {
+	for _, rate := range []int{8000, 44100, 48000, 96000, 192000, 384000} {
+		want := int(time.Duration(rate) * nativeSourcePeriod / time.Second)
+		if got := nativeSourceFrames(rate); got != want || got <= 0 {
+			t.Fatalf("rate %d: frames %d, want %d", rate, got, want)
 		}
 	}
 }

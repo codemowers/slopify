@@ -20,7 +20,7 @@ func TestDeviceOwnershipAndNames(t *testing.T) {
 	if err := s.webCommandFor(user, p.ID, command{Op: "adopt"}); err != nil {
 		t.Fatal(err)
 	}
-	if p.Owner != queueID(user.Subject) || p.OwnerIssuer != user.Issuer || p.OwnerSubject != user.Subject || p.Name != "Lauri's HiFiBerry Amp2" {
+	if p.Owner != queueID(user.Subject) || p.OwnerIssuer != user.Issuer || p.OwnerSubject != user.Subject || p.Name != "HiFiBerry Amp2" {
 		t.Fatalf("wrong ownership/name: %+v", p)
 	}
 	if s.visiblePlayer("bob", p) {
@@ -30,7 +30,7 @@ func TestDeviceOwnershipAndNames(t *testing.T) {
 		{Issuer: user.Issuer, Subject: "bob"},
 		{Issuer: "https://different-idp.example", Subject: user.Subject},
 	} {
-		for _, op := range []string{"adopt", "rename", "forget", "volume"} {
+		for _, op := range []string{"adopt", "forget", "volume"} {
 			if err := s.webCommandFor(other, p.ID, command{Op: op, Name: "stolen", Level: level(20)}); !errors.Is(err, errForbidden) {
 				t.Fatalf("%s allowed for %+v: %v", op, other, err)
 			}
@@ -39,19 +39,14 @@ func TestDeviceOwnershipAndNames(t *testing.T) {
 	if err := s.userCommand("bob", command{Op: "outputs", Outputs: []string{p.ID}}); !errors.Is(err, errForbidden) {
 		t.Fatalf("foreign output selected: %v", err)
 	}
-	if err := s.webCommandFor(user, p.ID, command{Op: "rename", Name: "Living room"}); err != nil {
-		t.Fatal(err)
+	if err := s.webCommandFor(user, p.ID, command{Op: "rename", Name: "Living room"}); !errors.Is(err, errBadRequest) {
+		t.Fatal("rename accepted", err)
 	}
 	p.ReportedName = "New local name"
+	p.NameSet = true
 	refreshDeviceName(p)
-	if p.Name != "Living room" {
-		t.Fatal("local name overwrote web override")
-	}
-	if err := s.webCommandFor(user, p.ID, command{Op: "rename"}); err != nil {
-		t.Fatal(err)
-	}
-	if p.Name != "Lauri's New local name" || p.NameSet {
-		t.Fatalf("default reset: %+v", p)
+	if p.Name != "New local name" || p.NameSet {
+		t.Fatalf("local name not applied: %+v", p)
 	}
 	p.TokenHash = "private-device-token"
 	b := s.marshal(p)
@@ -113,7 +108,7 @@ func TestLegacyDeviceOwnershipMigration(t *testing.T) {
 					t.Fatalf("unique selection not migrated: %+v", p)
 				}
 				s.rememberOwner(auth.Principal{Issuer: "https://idp.example", Subject: "alice", Name: "Lauri"})
-				if p.Name != "Lauri's Amp" {
+				if p.Name != "Amp" {
 					t.Fatalf("name: %q", p.Name)
 				}
 			} else {

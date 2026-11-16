@@ -24,17 +24,14 @@ func ownerDisplayName(name string) string {
 	return name
 }
 func refreshDeviceName(p *Player) {
-	if p.Kind != Device || p.NameSet {
+	if p.Kind != Device {
 		return
 	}
 	name := p.ReportedName
 	if name == "" {
 		name = "Speaker"
 	}
-	if p.Owner != "" {
-		name = ownerDisplayName(p.OwnerName) + "'s " + name
-	}
-	p.Name = name
+	p.Name, p.NameSet = name, false
 }
 
 // Refresh verified display claims without changing ownership or local identity.

@@ -1,3 +1,5 @@
+//go:build !no_wav
+
 package audiodec
 
 import (
@@ -19,6 +21,8 @@ type wavDecoder struct {
 	start, size int64
 	remaining   int64
 	buf         []byte
+	opts        Options
+	declared    int64 // data size the header claims, when it exceeds the file
 }
 
 func openWAV(r io.ReadSeeker) (Decoder, error) {
@@ -72,8 +76,12 @@ func openWAV(r io.ReadSeeker) (Decoder, error) {
 			if err != nil {
 				return nil, err
 			}
-			// Streaming writers leave the size as zero or all ones.
+			// Streaming writers leave the size as zero or all ones; any other size
+			// beyond the end of the file means the file was cut short.
 			if size == 0 || size > end-start {
+				if size != 0 && size != 0xFFFFFFFF {
+					d.declared = size
+				}
 				size = end - start
 			}
 			if _, err := r.Seek(start, io.SeekStart); err != nil {
@@ -99,6 +107,12 @@ func (d *wavDecoder) Read(dst []int32) (int, error) {
 	}
 	want := min(int64(frames*frameBytes), d.remaining/int64(frameBytes)*int64(frameBytes))
 	if want == 0 {
+		if d.declared > d.size {
+			rate := float64(d.format.Rate)
+			d.opts.report(Issue{Codec: "WAV", Kind: IssueTruncated, At: float64(d.size/int64(frameBytes)) / rate,
+				Offset: d.start + d.size, Missing: float64((d.declared-d.size)/int64(frameBytes)) / rate})
+			d.declared = 0 // once
+		}
 		return 0, io.EOF
 	}
 	if int64(cap(d.buf)) < want {
@@ -108,7 +122,14 @@ func (d *wavDecoder) Read(dst []int32) (int, error) {
 	got, err := io.ReadFull(d.r, b)
 	got -= got % frameBytes
 	if got == 0 {
-		if err == io.ErrUnexpectedEOF {
+		if err == io.ErrUnexpectedEOF || err == io.EOF {
+			if d.size < streamEnd && d.remaining >= int64(frameBytes) {
+				rate := float64(d.format.Rate)
+				played := (d.size - d.remaining) / int64(frameBytes)
+				d.opts.report(Issue{Codec: "WAV", Kind: IssueTruncated, At: float64(played) / rate,
+					Offset: d.start + d.size - d.remaining, Missing: float64(d.remaining/int64(frameBytes)) / rate})
+				d.remaining = 0
+			}
 			return 0, io.EOF
 		}
 		return 0, err
@@ -140,4 +161,14 @@ func (d *wavDecoder) Seek(seconds float64) (float64, error) {
 	}
 	d.remaining = d.size - offset
 	return float64(offset/frameBytes) / float64(d.format.Rate), nil
+}
+
+const wavEnabled = true
+
+func openWAVWith(r io.ReadSeeker, opts Options) (Decoder, error) {
+	dec, err := openWAV(r)
+	if w, ok := dec.(*wavDecoder); ok {
+		w.opts = opts
+	}
+	return dec, err
 }
