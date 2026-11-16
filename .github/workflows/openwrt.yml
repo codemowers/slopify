@@ -1,8 +1,7 @@
 name: OpenWrt images
 
 on:
-  push:
-    tags: ['*']
+  workflow_call:
 
 permissions:
   contents: read
@@ -13,16 +12,32 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        profile: [rpi-3, cubietruck]
+        profile: [rpi-3, rpi-4, rpi-5]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - run: player/openwrt/build.sh ${{ matrix.profile }}
+      # Go runs on the runner; only official Image Builder runs in Docker.
+      # Experimental source/SDK kernel builds never run in release CI.
+      - name: Build static player and assemble image with Docker Image Builder
+        env:
+          PROFILE: ${{ matrix.profile }}
+        run: player/openwrt/build.sh "$PROFILE"
+      - name: Prepare release images and manifests
+        env:
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          mkdir -p release
+          for file in dist/openwrt/"$PROFILE"/*; do
+            # The final release job checksums the renamed asset filenames.
+            [ "$(basename "$file")" != sha256sums ] || continue
+            cp "$file" "release/slopify-$PROFILE-$(basename "$file")"
+          done
+          test -n "$(find release -name '*.img.gz' -print -quit)"
       - uses: actions/upload-artifact@v4
         with:
-          name: openwrt-${{ matrix.profile }}
-          path: dist/openwrt/${{ matrix.profile }}/
+          name: release-openwrt-${{ matrix.profile }}
+          path: release/
           if-no-files-found: error
           compression-level: 0

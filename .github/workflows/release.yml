@@ -1,0 +1,189 @@
+name: Build and release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v[0-9]*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      registry: ${{ steps.release.outputs.registry }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate release version
+        id: release
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ "$GITHUB_REF_TYPE" != tag ]]; then
+            version="0.0.0-dev.${GITHUB_SHA:0:12}"
+          else
+            version="${TAG#v}"
+          fi
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo 'Release tags must be vMAJOR.MINOR.PATCH, optionally with a prerelease suffix.' >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "registry=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+          if [[ "$version" == *-* ]]; then prerelease=true; else prerelease=false; fi
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.20.0
+      - name: Validate chart
+        run: |
+          helm lint chart --set allowAllUsers=true
+          helm template slopify chart --set allowAllUsers=true >/dev/null
+
+  player:
+    needs: prepare
+    uses: ./.github/workflows/player.yml
+
+  openwrt:
+    needs: prepare
+    uses: ./.github/workflows/openwrt.yml
+
+  images:
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [indexer, catalog, streamer, players, frontend, transcoder]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        if: github.ref_type == 'tag'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish server image
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: build/${{ matrix.service }}.Dockerfile
+          platforms: linux/amd64
+          push: ${{ github.ref_type == 'tag' }}
+          load: ${{ github.ref_type != 'tag' }}
+          tags: |
+            ${{ needs.prepare.outputs.registry }}/slopify-${{ matrix.service }}:${{ github.ref_name }}
+            ${{ needs.prepare.outputs.registry }}/slopify-${{ matrix.service }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+          cache-from: type=gha,scope=release-${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.service }}
+      - name: Record immutable image digest
+        env:
+          SERVICE: ${{ matrix.service }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          mkdir -p digests
+          printf '%s\n' "$DIGEST" > "digests/$SERVICE.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-digest-${{ matrix.service }}
+          path: digests/${{ matrix.service }}.txt
+          if-no-files-found: error
+
+  chart:
+    needs: [prepare, images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.20.0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: image-digest-*
+          path: digests
+          merge-multiple: true
+      - name: Package chart with immutable server images
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          REGISTRY: ${{ needs.prepare.outputs.registry }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          chart_dir="$RUNNER_TEMP/chart"
+          mkdir -p "$chart_dir" release
+          cp chart/Chart.yaml chart/values.yaml "$chart_dir/"
+          cp -R chart/templates "$chart_dir/"
+          printf 'imageRepository: ""\nimages:\n' > release/release-values.yaml
+          for service in indexer catalog streamer players frontend transcoder; do
+            digest="$(cat "digests/$service.txt")"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            image="$REGISTRY/slopify-$service@$digest"
+            test "$(grep -Fxc "  $service: slopify-$service:latest" "$chart_dir/values.yaml")" = 1
+            sed -i "s|^  $service: slopify-$service:latest$|  $service: $image|" "$chart_dir/values.yaml"
+            printf '  %s: %s\n' "$service" "$image" >> release/release-values.yaml
+          done
+          helm lint "$chart_dir" --set allowAllUsers=true
+          helm template slopify "$chart_dir" --set allowAllUsers=true >/dev/null
+          helm package "$chart_dir" --destination release --version "$VERSION" --app-version "$TAG"
+      - name: Publish OCI Helm chart
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_USER: ${{ github.actor }}
+          REGISTRY: ${{ needs.prepare.outputs.registry }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          printf '%s' "$GH_TOKEN" | helm registry login ghcr.io --username "$GH_USER" --password-stdin
+          helm push "release/slopify-$VERSION.tgz" "oci://$REGISTRY/charts"
+          printf 'Chart: oci://%s/charts/slopify --version %s\n' "$REGISTRY" "$VERSION" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-chart
+          path: release/
+          if-no-files-found: error
+
+  release:
+    needs: [prepare, player, openwrt, chart]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release
+          merge-multiple: true
+      - name: Publish GitHub Release and checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+        run: |
+          cd release
+          sha256sum ./* > SHA256SUMS
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --draft --title "$TAG" --generate-notes
+          fi
+          gh release upload "$TAG" ./* --clobber
+          gh release edit "$TAG" --draft=false --prerelease="$PRERELEASE"

@@ -1,8 +1,7 @@
 name: Player binaries
 
 on:
-  push:
-    tags: ['*']
+  workflow_call:
 
 permissions:
   contents: read
@@ -19,19 +18,24 @@ jobs:
           - { name: linux-arm64, goarch: arm64 }
           - { name: linux-armv7, goarch: arm, goarm: "7" }
           - { name: linux-armv6, goarch: arm, goarm: "6" }
+          - { name: linux-mips-softfloat, goarch: mips, gomips: softfloat }
+          - { name: linux-mipsle-softfloat, goarch: mipsle, gomips: softfloat }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - run: go build -trimpath -ldflags='-s -w' -o "dist/slopify-player-${{ matrix.name }}" ./player
+      - name: Build static player
+        run: go build -trimpath -ldflags='-s -w' -o "dist/slopify-player-$TARGET" ./player
         env:
+          TARGET: ${{ matrix.name }}
           CGO_ENABLED: "0"
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
+          GOMIPS: ${{ matrix.gomips }}
       - uses: actions/upload-artifact@v4
         with:
-          name: slopify-player-${{ matrix.name }}
+          name: release-player-${{ matrix.name }}
           path: dist/slopify-player-${{ matrix.name }}
           if-no-files-found: error
