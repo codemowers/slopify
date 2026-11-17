@@ -360,7 +360,10 @@ No IR transmitter or external ALSA-control daemon is implemented.
 
 The player publishes its receivers itself through Avahi's D-Bus API (`advertise`, `discovery.Publish`):
 Pulse as SLOPIFY_NAME plus " via PulseAudio" for instance and description, with `device=` the sink name,
-and AirPlay as `HWADDR@name via AirPlay`, so desktop sink lists distinguish transports. Nothing is published for loopback listeners, and an IPv4 listener is
+and AirPlay as `HWADDR@name via AirPlay`, so desktop sink lists distinguish transports.
+The Pulse sink format (sink/server info and mDNS `format=`) is the widest the ALSA output
+accepts without truncation (S32, else S24, else S16), queried once at startup with
+`alsa.Formats`; tunnels copy it. Unknown, busy or null outputs keep S32LE. Nothing is published for loopback listeners, and an IPv4 listener is
 advertised for IPv4 only. Do not restore avahi-publish-service units or the avahi-utils package.
 LAN receivers share `liveStream`, `pcmring.Stats`, `cleantext.Line` for untrusted names, one coalescing
 sender-volume worker (`sender_volume.go`) and, for senders that take transport commands, `remoteSource`.

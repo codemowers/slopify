@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/codemowers/slopify/internal/volume"
+	"github.com/codemowers/slopify/player/internal/alsa"
 	"github.com/codemowers/slopify/player/internal/audiometer"
 	"github.com/codemowers/slopify/player/internal/esound"
 	"github.com/codemowers/slopify/player/internal/pcmring"
@@ -335,16 +336,17 @@ func (c *controller) startNativeSources(ctx context.Context, backend *nativeBack
 		if err != nil {
 			return err
 		}
-		server := pulse.NewServer(pulse.Config{Name: sinkName, Description: c.name + " via PulseAudio", MinBufferMillis: pulseBufferMS,
+		sinkFormat := pulseSinkFormat(backend.alsaDevice, alsa.Formats)
+		server := pulse.NewServer(pulse.Config{Name: sinkName, Description: c.name + " via PulseAudio", MinBufferMillis: pulseBufferMS, Format: sinkFormat,
 			OnStream: func(stream *pulse.Stream) { lan.addStream(pulseLive{stream}) }, OnVolume: lan.setVolume})
 		go func() {
 			if err := server.Serve(ctx, listener); err != nil {
 				slog.Error("pulse receiver", "err", err)
 			}
 		}()
-		advertise(ctx, "_pulse-sink._tcp", listener, []string{"device=" + sinkName, "description=" + c.name + " via PulseAudio", "format=s32le"},
+		advertise(ctx, "_pulse-sink._tcp", listener, []string{"device=" + sinkName, "description=" + c.name + " via PulseAudio", "format=" + pulse.FormatName(sinkFormat)},
 			func(collision int) string { return collisionName(c.name, collision) + " via PulseAudio" })
-		slog.Info("pulse receiver listening", "address", pulseListen, "sink", sinkName)
+		slog.Info("pulse receiver listening", "address", pulseListen, "sink", sinkName, "format", pulse.FormatName(sinkFormat))
 	}
 	if esoundListen != "" {
 		listener, err := net.Listen("tcp", esoundListen)

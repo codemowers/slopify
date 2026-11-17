@@ -15,6 +15,7 @@ import (
 
 	"github.com/codemowers/slopify/player/internal/alsa"
 	"github.com/codemowers/slopify/player/internal/audiodec"
+	"github.com/codemowers/slopify/player/internal/pulse"
 	"github.com/codemowers/slopify/player/internal/rtp"
 )
 
@@ -51,7 +52,9 @@ type nativeBackend struct {
 	playbackServices
 	open     func(format) (nativeOutput, error)
 	openLive func(format) (nativeOutput, error)
-	client   *http.Client
+	// alsaDevice is the hw: spec of an ALSA output, empty for null.
+	alsaDevice string
+	client     *http.Client
 	// sender is the opt-in multicast copy of what this backend decodes.
 	sender *rtp.Sender
 	// readAhead bounds originals downloaded ahead of decoding; nil disables it.
@@ -100,6 +103,7 @@ func newNativeBackend(services playbackServices, output string) (*nativeBackend,
 		if _, _, err := alsa.ParseDevice(target); err != nil {
 			return nil, err
 		}
+		b.alsaDevice = target
 		b.open = func(f format) (nativeOutput, error) { return openALSAOutput(target, f, false) }
 		b.openLive = func(f format) (nativeOutput, error) { return openALSAOutput(target, f, true) }
 	default:
@@ -810,6 +814,37 @@ type alsaOutput struct {
 	source    int
 	duplicate bool
 	scratch   []byte
+}
+
+// pulseSinkFormat picks the Pulse sink format that the output plays without
+// truncation, so that tunnels, which copy the sink's format, send audio the
+// device accepts. Anything unknown keeps S32LE, which carries every precision.
+func pulseSinkFormat(device string, query func(string) ([]int, error)) int {
+	if device == "" {
+		return pulse.FormatS32LE
+	}
+	formats, err := query(device)
+	if err != nil {
+		slog.Warn("pulse sink format unknown; advertising s32le", "device", device, "err", err)
+		return pulse.FormatS32LE
+	}
+	best := 0
+	for _, f := range formats {
+		switch f {
+		case alsa.FormatS32LE:
+			return pulse.FormatS32LE
+		case alsa.FormatS24LE, alsa.FormatS243LE:
+			best = pulse.FormatS24LE
+		case alsa.FormatS16LE:
+			if best == 0 {
+				best = pulse.FormatS16LE
+			}
+		}
+	}
+	if best == 0 {
+		return pulse.FormatS32LE
+	}
+	return best
 }
 
 func nativeFormats(bits int, allowTruncate bool) []int {
