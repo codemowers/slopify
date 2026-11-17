@@ -259,6 +259,34 @@ func Open(spec string, capture bool, format, rate, channels int) (*PCM, error) {
 	return OpenBuffered(spec, capture, format, rate, channels, bufferMinMicros, bufferMaxMicros, periodMinMicros, periodMaxMicros)
 }
 
+// Formats reports which of this package's sample formats a playback device
+// accepts for interleaved access, without configuring it. A device held by
+// another process fails with EBUSY rather than waiting.
+func Formats(spec string) ([]int, error) {
+	card, device, err := ParseDevice(spec)
+	if err != nil {
+		return nil, err
+	}
+	path := fmt.Sprintf("/dev/snd/pcmC%dD%dp", card, device)
+	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, fmt.Errorf("opening %s: %w", path, err)
+	}
+	defer unix.Close(fd)
+	p := anyParams()
+	p.setMask(paramAccess, accessRWInterleaved)
+	if err := ioctl(fd, iocHwRefine, unsafe.Pointer(p)); err != nil {
+		return nil, fmt.Errorf("querying %s: %w", path, err)
+	}
+	var formats []int
+	for _, f := range []int{FormatS32LE, FormatS24LE, FormatS243LE, FormatS16LE} {
+		if p.masks[paramFormat].bits[f/32]&(1<<(f%32)) != 0 {
+			formats = append(formats, f)
+		}
+	}
+	return formats, nil
+}
+
 // OpenLowLatency trades underrun margin for delay, for live LAN sources whose
 // picture may be waiting on the sound.
 func OpenLowLatency(spec string, format, rate, channels int) (*PCM, error) {

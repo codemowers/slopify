@@ -29,6 +29,7 @@ var errUnavailable = errors.New("ALSA is available on Linux only")
 
 func Open(string, bool, int, int, int) (*PCM, error)     { return nil, errUnavailable }
 func OpenLowLatency(string, int, int, int) (*PCM, error) { return nil, errUnavailable }
+func Formats(string) ([]int, error)                      { return nil, errUnavailable }
 func (*PCM) Config() Config                              { return Config{} }
 func (*PCM) WriteFrames([]byte) (int, error)             { return 0, errUnavailable }
 func (*PCM) ReadFrames([]byte) (int, error)              { return 0, errUnavailable }
