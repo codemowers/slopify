@@ -242,6 +242,9 @@ func ParseDevice(spec string) (card, device int, err error) {
 // Config is an opened device's negotiated shape.
 type Config struct {
 	Format, Rate, Channels, PeriodFrames, BufferFrames int
+	// Tuned is false when the device refused the preferred buffer window
+	// and chose its own sizes.
+	Tuned bool
 }
 
 // PCM is one open playback or capture substream.
@@ -259,8 +262,8 @@ func Open(spec string, capture bool, format, rate, channels int) (*PCM, error) {
 	return OpenBuffered(spec, capture, format, rate, channels, bufferMinMicros, bufferMaxMicros, periodMinMicros, periodMaxMicros)
 }
 
-// OpenLowLatency trades underrun margin for delay, for live LAN sources whose
-// picture may be waiting on the sound.
+// OpenLowLatency trades underrun margin for delay, for decoded live LAN audio
+// whose sender is waiting on the receiver's queue.
 func OpenLowLatency(spec string, format, rate, channels int) (*PCM, error) {
 	return OpenBuffered(spec, false, format, rate, channels, 40_000, 80_000, 10_000, 20_000)
 }
@@ -302,7 +305,15 @@ func (c *PCM) configure(format, rate, channels int, bufferMin, bufferMax, period
 	tuned.setInterval(paramBufferTime, bufferMin, bufferMax)
 	tuned.setInterval(paramPeriodTime, periodMin, periodMax)
 	tuned.rmask = ^uint32(0)
-	if ioctl(c.fd, iocHwRefine, unsafe.Pointer(&tuned)) == nil {
+	ok := ioctl(c.fd, iocHwRefine, unsafe.Pointer(&tuned)) == nil
+	if !ok {
+		// Keep the buffer window even when the period range cannot fit it.
+		tuned = *p
+		tuned.setInterval(paramBufferTime, bufferMin, bufferMax)
+		tuned.rmask = ^uint32(0)
+		ok = ioctl(c.fd, iocHwRefine, unsafe.Pointer(&tuned)) == nil
+	}
+	if ok {
 		*p = tuned
 	}
 	p.rmask = ^uint32(0)
@@ -310,7 +321,7 @@ func (c *PCM) configure(format, rate, channels int, bufferMin, bufferMax, period
 		return fmt.Errorf("configuring device: %w", err)
 	}
 	c.config = Config{Format: format, Rate: rate, Channels: channels,
-		PeriodFrames: int(p.get(paramPeriodSize)), BufferFrames: int(p.get(paramBufferSize))}
+		PeriodFrames: int(p.get(paramPeriodSize)), BufferFrames: int(p.get(paramBufferSize)), Tuned: ok}
 	if c.config.PeriodFrames <= 0 || c.config.BufferFrames <= 0 {
 		return errors.New("device reported an empty buffer")
 	}

@@ -93,6 +93,10 @@ return view.extend({
 		o.value('auto', audio.auto ? _('Automatic (%s)').format(audio.auto) : _('Automatic'));
 		audio.cards.forEach(function(c) { o.value(c.id, c.name ? '%s (%s)'.format(c.name, c.id) : c.id); });
 
+		o = s.taboption('general', form.Value, 'output_buffer_ms', _('Output buffer'), _('ALSA kernel buffer capacity for all sources, in milliseconds, 40 to 10000 (10 seconds). Empty negotiates 40 to 80 for LAN sources and 200 to 500 for Slopify originals. Larger buffers add scheduling margin and playback delay. Input and download buffers are separate. The sound card may negotiate a different capacity.'));
+		o.datatype = 'range(40,10000)';
+		o.placeholder = 'auto';
+
 		o = s.taboption('general', form.Flag, 'allow_truncate', _('Allow 16-bit fallback'),
 			_('If no output format preserves the input precision, permit discarding low bits to play at 16 bits. Sample rate stays unchanged. Disabled by default.'));
 		o.default = '0';
@@ -262,9 +266,6 @@ return view.extend({
 		});
 		o = s.taboption('receivers', form.Flag, 'pulse', _('PulseAudio/PipeWire'), _('TCP 4713, advertised over mDNS. No authentication.'));
 		o.rmempty = false;
-		o = s.taboption('receivers', form.Value, 'live_buffer_ms', _('Output buffer'), _('Milliseconds of audio queued at the sound card for these receivers, 40 to 2000. Lower keeps video closer to sound; too low causes dropouts. Empty lets the card choose, 40 to 80.'));
-		o.datatype = 'range(40,2000)';
-		o.placeholder = 'auto';
 
 		o = s.taboption('receivers', form.Flag, 'esound', _('ESound'), _('TCP 16001. No authentication.'));
 		o.rmempty = false;

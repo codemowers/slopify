@@ -10,7 +10,7 @@ USE_PROCD=1
 
 start_service() {
 	local server card name listen pulse esound upnp raop raop_crypto rtp rtp_send queue_share rtp_send_group volume_control vmin vmax vinitial
-	local live_buffer rotary path key flag option default value local_sse_interval_ms metrics
+	local output_buffer rotary path key flag option default value local_sse_interval_ms metrics
 	/usr/libexec/slopify/rtp-group || return 1
 	config_load slopify
 	config_get server player server
@@ -24,7 +24,7 @@ start_service() {
 	config_get_bool rtp_send player rtp_send 0
 	config_get_bool queue_share player queue_share 0
 	config_get rtp_send_group player rtp_send_group
-	config_get live_buffer player live_buffer_ms
+	config_get output_buffer player output_buffer_ms
 	config_get read_ahead player read_ahead_mib -1
 	config_get memory_limit player memory_limit 64MiB
 	config_get local_sse_interval_ms player local_sse_interval_ms 200
@@ -102,7 +102,7 @@ start_service() {
 	procd_append_param command -cue-level-db "$value"
 	config_get_bool value player allow_truncate 0
 	[ "$value" = 1 ] && procd_append_param command -allow-truncate
-	[ -n "$live_buffer" ] && procd_append_param command -live-device-buffer-ms="$live_buffer"
+	[ -n "$output_buffer" ] && procd_append_param command -output-buffer-ms="$output_buffer"
 	for option in pulse_buffer_ms esound_buffer_ms esound_socket_ms rtp_buffer_ms raop_buffer_ms; do
 		config_get value player "$option"
 		flag="$(printf '%s' "$option" | tr _ -)"

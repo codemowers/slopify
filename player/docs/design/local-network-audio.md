@@ -192,10 +192,11 @@ inferred from recent sound, as DACP status is not polled, and the speaker's volu
 move the sender's slider.
 
 **Pulse behaviour to preserve.** PipeWire's tunnel steers reported latency plus its ring to
-200 ms. Latency replies therefore report no device delay, and the player never buffers
-beyond what the tunnel asks, because past that the tunnel drains its ring and sends silence,
-heard as steady ticks. A cost of this is that senders get no A/V sync correction;
-`-live-device-buffer-ms` shrinks the delay instead. A tunnel also answers an underflow by
+200 ms. Latency replies include actual device delay; stream indices already account
+for the input queue. The player never buffers beyond what the tunnel asks, because
+past that the tunnel drains its ring and sends silence, heard as steady ticks.
+The LAN-source output default is 40–80 ms (Slopify originals keep 200–500 ms).
+`-output-buffer-ms` overrides output capacity for all sources from 40 to 10000 ms. A/V correction remains experimental. A tunnel also answers an underflow by
 rewinding and resending, heard as looping, so a live stream is never read faster than real
 time, and the start threshold stays below the target minus `minReq`.
 

@@ -185,26 +185,36 @@ func (r *nativeRouter) release(id string, drain bool) error {
 	return err
 }
 
-// deviceFill returns frames queued in the device and its capacity, when id owns it.
-func (r *nativeRouter) deviceFill(id string) (queued, capacity int) {
+// deviceFill returns frames queued in the device, its capacity and the fill at
+// which a stopped device starts playing, when id owns it.
+func (r *nativeRouter) deviceFill(id string) (queued, capacity, start int) {
 	r.mu.Lock()
 	device, owner := r.device, r.owner
 	r.mu.Unlock()
 	if device == nil || owner != id {
-		return 0, 0
+		return 0, 0, 0
 	}
 	device.mu.Lock()
 	defer device.mu.Unlock()
 	if device.output == nil {
-		return 0, 0
+		return 0, 0, 0
 	}
 	if sized, ok := device.output.(interface{ BufferFrames() int }); ok {
 		capacity = sized.BufferFrames()
 	}
-	return device.output.Delay(), capacity
+	if s, ok := device.output.(interface{ StartFrames() int }); ok {
+		start = s.StartFrames()
+	}
+	return device.output.Delay(), capacity, start
 }
 
 func (r *nativeRouter) delay(id string) int {
+	queued, _, _ := r.deviceFill(id)
+	return queued
+}
+
+// capacity is the device buffer in frames when id owns it, without a delay query.
+func (r *nativeRouter) capacity(id string) int {
 	r.mu.Lock()
 	device, owner := r.device, r.owner
 	r.mu.Unlock()
@@ -213,10 +223,10 @@ func (r *nativeRouter) delay(id string) int {
 	}
 	device.mu.Lock()
 	defer device.mu.Unlock()
-	if device.output == nil {
-		return 0
+	if sized, ok := device.output.(interface{ BufferFrames() int }); ok {
+		return sized.BufferFrames()
 	}
-	return device.output.Delay()
+	return 0
 }
 
 // routedOutput gives the Slopify session a device that may or may not be its own
@@ -252,7 +262,7 @@ const nativeFillTime = 2 * time.Second
 
 func (p *nativeFillPacer) reset() { p.started = time.Time{} }
 
-func (p *nativeFillPacer) wait(next time.Time, frames, rate int, delay time.Duration, now time.Time) time.Time {
+func (p *nativeFillPacer) wait(next time.Time, frames, rate, delay, start int, now time.Time) time.Time {
 	if p.started.IsZero() {
 		p.started = now
 		// A source switch or reopen can leave the old deadline behind now.
@@ -260,8 +270,9 @@ func (p *nativeFillPacer) wait(next time.Time, frames, rate int, delay time.Dura
 		next = now
 	}
 	// Past the fill, only a device running short may read ahead of the clock, so
-	// that clock drift never starves it.
-	if now.Sub(p.started) > nativeFillTime && delay < 100*time.Millisecond {
+	// that clock drift never starves it. Below its start threshold, as after an
+	// underrun, a device is silent, so pacing it would only delay recovery.
+	if now.Sub(p.started) > nativeFillTime && delay < nativeRefillMark(start, rate) {
 		return time.Time{}
 	}
 	return nativePace(next, frames, rate)
@@ -286,19 +297,17 @@ func (o *routedOutput) Format() localPCM {
 }
 
 // BufferFrames is the device buffer while this output holds the device, else zero.
-func (o *routedOutput) BufferFrames() int {
-	_, capacity := o.router.deviceFill(o.id)
-	return capacity
-}
+func (o *routedOutput) BufferFrames() int { return o.router.capacity(o.id) }
 
 // startNativeSources routes playback and, when configured,
 // the trusted-LAN Pulse receiver.
 func (c *controller) startNativeSources(ctx context.Context, backend *nativeBackend, pulseListen, esoundListen string, pulseBufferMS, esoundBufferMS, esoundSocketMS int, upnpListen, sinkName string, rtpConfig *rtp.Config) error {
+	// Capture the device openers now: backend.open is replaced below by the routed one.
 	deep, live := backend.open, backend.openLive
 	router := &nativeRouter{onDevice: c.local.nativeDevice, open: func(id string, f format) (nativeOutput, error) {
 		open := live
 		if id == "slopify" {
-			open = deep // Local files can afford a deep buffer.
+			open = deep // Compressed originals over the internet get a deep buffer.
 		}
 		output, err := open(f)
 		if a, ok := output.(*alsaOutput); ok {
@@ -646,12 +655,13 @@ func (l *nativeLAN) consume(ctx context.Context, consumer *nativeConsumer) {
 			if metricsEnabled {
 				metricWriteTime.WithLabelValues(audio(stageOutput, id)...).Observe(time.Since(writeAt).Seconds())
 			}
-			delay = time.Duration(l.router.delay(id)) * time.Second / time.Duration(pcm.rate)
+			queued, _, start := l.router.deviceFill(id)
+			delay = time.Duration(queued) * time.Second / time.Duration(pcm.rate)
 			if metricsEnabled {
 				metricBuffer.WithLabelValues(audio(stageOutput, id)...).Observe(delay.Seconds())
 			}
 			stream.SetDeviceDelay(uint64(delay / time.Microsecond))
-			next = fill.wait(next, count/pcm.channels, pcm.rate, delay, time.Now())
+			next = fill.wait(next, count/pcm.channels, pcm.rate, queued, start, time.Now())
 		case errors.Is(err, errNotRouted):
 			fill.reset()
 			stream.SetDeviceDelay(0)
@@ -680,7 +690,7 @@ func (l *nativeLAN) bufferStatus(p *speakerSource) *sourceBuffer {
 	if p.Format != nil {
 		rate = p.Format.Rate
 	}
-	if queued, capacity := l.router.deviceFill(p.ID); rate > 0 {
+	if queued, capacity, _ := l.router.deviceFill(p.ID); rate > 0 {
 		buffer.DeviceMS, buffer.DeviceMaxMS = queued*1000/rate, capacity*1000/rate
 	}
 	if backend, ok := l.c.backend.(*nativeBackend); ok && p.ID == "slopify" {

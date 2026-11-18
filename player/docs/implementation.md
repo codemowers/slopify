@@ -142,9 +142,17 @@ Pulse timing replies include output-device delay so a sender can compensate
 video timing. The stream's read/write indices already describe its input queue.
 The card's A/V offset estimates receiver queue plus device delay; it excludes
 the sender, network and any downstream amplifier processing, and does not measure
-actual lip-sync error. Live device buffers default to 40–80 ms; ordinary Slopify
-playback retains its deeper buffer. Larger explicit live buffers may exceed a
-PipeWire tunnel's configured latency budget. A/V support remains experimental.
+actual lip-sync error. Slopify originals prefer a 200–500 ms ALSA device buffer;
+LAN sources prefer 40–80 ms with 10–20 ms periods. Override output capacity for all sources
+with `-output-buffer-ms` (40–10000 ms). Standalone `play` uses the same flag.
+Zero negotiates the respective default; explicit values request approximately
+that capacity (within −20%/+25%). A device that cannot meet the request falls
+back to its supported capacity and logs a warning. OpenWrt exposes
+`output_buffer_ms` in General.
+The actual queued delay varies with fill level. Larger buffers add playback
+delay as well as scheduling margin. The decoded queue and download budget
+remain separate. Larger LAN output buffers may exceed a PipeWire tunnel's
+latency budget. A/V support remains experimental.
 
 The native engine downloads the current original to its end in the background, and only
 then starts on the next track, so a congested uplink drains a whole track of slack rather

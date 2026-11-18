@@ -37,9 +37,8 @@ config player 'player'
 	option queue_share '0'
 	# ADDRESS or ADDRESS:PORT (default port 5004). Generated once and saved at boot.
 	option rtp_send_group ''
-	# ALSA buffer for LAN sources in ms, 40 to 2000. Empty lets the device choose,
-	# 40 to 80. Lower keeps video closer to sound; too low underruns.
-	option live_buffer_ms ''
+	# ALSA output buffer for all sources in ms, 40 to 10000. Empty uses automatic defaults.
+	option output_buffer_ms ''
 	# Input buffers in milliseconds; empty uses protocol defaults.
 	option pulse_buffer_ms ''
 	option esound_buffer_ms ''

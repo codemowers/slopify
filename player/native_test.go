@@ -248,7 +248,7 @@ func TestFreshDeviceIsFilledAtRealTime(t *testing.T) {
 	var next time.Time
 	start := time.Now()
 	for range 25 { // 500 ms of audio in 20 ms writes.
-		next = fill.wait(next, 960, 48000, 0, time.Now())
+		next = fill.wait(next, 960, 48000, 0, 0, time.Now())
 	}
 	if elapsed := time.Since(start); elapsed < 450*time.Millisecond {
 		t.Fatalf("500 ms of audio consumed in %v", elapsed)
@@ -256,7 +256,7 @@ func TestFreshDeviceIsFilledAtRealTime(t *testing.T) {
 	// Later, a device running short may catch up instead of waiting.
 	long := nativeFillPacer{started: time.Now().Add(-time.Minute)}
 	before := time.Now()
-	long.wait(time.Time{}, 48000, 48000, 0, time.Now())
+	long.wait(time.Time{}, 48000, 48000, 0, 0, time.Now())
 	if time.Since(before) > 100*time.Millisecond {
 		t.Fatal("a running device short of audio was held back")
 	}
@@ -430,8 +430,28 @@ func TestFreshDeviceDiscardsPreviousPacingDeadline(t *testing.T) {
 	var fill nativeFillPacer
 	start := time.Now()
 	// Reopening after a source switch must not catch up 500 ms of old time.
-	fill.wait(start.Add(-500*time.Millisecond), 960, 48000, 0, start)
+	fill.wait(start.Add(-500*time.Millisecond), 960, 48000, 0, 0, start)
 	if elapsed := time.Since(start); elapsed < 15*time.Millisecond {
 		t.Fatalf("fresh output consumed audio immediately after reopen: %v", elapsed)
+	}
+}
+
+// A shallow device must not count as permanently short: the stall low-water mark
+// is half its capacity, and the pacer reads ahead only below the start threshold.
+func TestFillPacerScalesWithShallowBuffer(t *testing.T) {
+	if got := nativeLowWater(3840, 48000); got != 1920 {
+		t.Fatalf("80 ms buffer low water = %d, want 1920", got)
+	}
+	if got := nativeLowWater(24000, 48000); got != 4800 {
+		t.Fatalf("500 ms buffer low water = %d, want 4800", got)
+	}
+	// 80 ms buffer, 20 ms periods: starts at 60 ms (2880 frames).
+	fill := nativeFillPacer{started: time.Now().Add(-time.Minute)}
+	if next := fill.wait(time.Time{}, 480, 48000, 3000, 2880, time.Now()); next.IsZero() {
+		t.Fatal("a running 62 ms fill in an 80 ms buffer stopped being paced")
+	}
+	// After an underrun the device sits below its start threshold: refill freely.
+	if next := fill.wait(time.Time{}, 480, 48000, 2000, 2880, time.Now()); !next.IsZero() {
+		t.Fatal("a device below its start threshold was paced to real time")
 	}
 }

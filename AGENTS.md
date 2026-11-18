@@ -296,8 +296,18 @@ resending, heard as looping, so never read a live stream faster than real time
 including a source returning after idle. Pulse timing replies report actual
 device delay; the protocol indices already account for the stream ring, so do
 not add that ring a second time. Never buffer beyond what a tunnel asks. Keep
-the live device default at 40–80 ms so receiver queues can fit within the usual
-200 ms PipeWire tunnel target; an explicit `-live-device-buffer-ms` overrides it.
+LAN-source device default (decoded live audio) at 40–80 ms with 10–20 ms periods,
+so receiver queues fit within the usual 200 ms PipeWire tunnel target. Slopify
+queue originals, compressed and fetched over the internet, keep the deep
+200–500 ms default; this discrimination is deliberate. The stall drone's
+low-water mark is 100 ms or half the device capacity, whichever is smaller; the
+fill pacer reads ahead only below 100 ms or the device start threshold (buffer
+minus one period), so a shallow buffer is never permanently "short" and a
+device recovering from an underrun refills instead of waiting at its threshold.
+`-output-buffer-ms` overrides ALSA output capacity for all sources, including
+standalone file playback (40–10000 ms). Zero keeps the respective automatic
+defaults. OpenWrt exposes `output_buffer_ms` in the General tab. Input and download
+buffers remain separate; do not add per-protocol output knobs.
 The local Pulse card's `syncOffsetMs` is receiver-ring plus device delay, not
 measured lip-sync error or sender/network latency. Render changing input bitrate
 and A/V offset after the fixed PCM/state text in that row.
@@ -958,7 +968,7 @@ native-engine cues on the Slopify output: a 120 ms
 upward sweep when a seek restarts playback (played at once, in the last format),
 and, once a track is playing on a buffered device, a looping winding-down drone
 (6 dB below the configured cue level) written whenever nothing is decoded and the device holds under
-100 ms. Gate the drone on at least one second of music written in the current
+its low-water mark (100 ms, or half a shallower buffer). Gate the drone on at least one second of music written in the current
 track, and check cancellation before every fill; startup and cancelled sessions
 must not add a winding-down tone. Neither is metered, multicast or counted in the reported position.
 

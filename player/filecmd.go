@@ -100,16 +100,21 @@ func validateCommand(ctx context.Context, args []string) int {
 
 func playCommand(ctx context.Context, args []string) int {
 	fl := flag.NewFlagSet("play", flag.ExitOnError)
+	fl.IntVar(&outputBufferMS, "output-buffer-ms", 0, outputBufferHelp)
 	fl.BoolVar(&allowOutputTruncate, "allow-truncate", false, "permit truncating to 16-bit output if no precision-preserving ALSA format works")
 	output := fl.String("output", "alsa:hw:0,0", "alsa:hw:CARD=...,DEV=... (snd-dummy works too) or null for real-time discard")
 	seek := fl.Float64("seek", 0, "start the first file at this many seconds")
 	fl.Usage = func() {
-		fmt.Fprintf(fl.Output(), "usage: %s play [-output SPEC] [-seek S] PATH...\n\n"+
+		fmt.Fprintf(fl.Output(), "usage: %s play [-output SPEC] [-output-buffer-ms MS] [-allow-truncate] [-seek S] PATH...\n\n"+
 			"Plays files in real time through the built-in decoders, gaplessly while the format\n"+
 			"is unchanged. The device is opened exclusively; truncation requires -allow-truncate.\n\n", os.Args[0])
 		fl.PrintDefaults()
 	}
 	fl.Parse(args)
+	if !validOutputBuffer(outputBufferMS) {
+		fmt.Fprintln(os.Stderr, "output-buffer-ms must be 0 or 40 to 10000")
+		return 2
+	}
 	if fl.NArg() == 0 {
 		fl.Usage()
 		return 2

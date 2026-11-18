@@ -49,6 +49,7 @@ func nativeInputPCM(f format, codec string, lossy bool) localPCM {
 // Unsupported formats fail visibly; decoding never uses an external process.
 type nativeBackend struct {
 	playbackServices
+	// open gives Slopify originals a deep buffer; openLive is for LAN sources.
 	open     func(format) (nativeOutput, error)
 	openLive func(format) (nativeOutput, error)
 	client   *http.Client
@@ -410,10 +411,29 @@ type nativeMark struct {
 	gap   uint64 // frames of stall sound, which the position does not count
 }
 
+// nativeLowWater is how little audio, in frames, a device may hold before it is
+// running short: 100 ms, or half its capacity when that is smaller, so that a
+// shallow buffer is not always short.
+func nativeLowWater(capacity, rate int) int {
+	low := rate * 100 / 1000
+	if capacity > 0 {
+		low = min(low, capacity/2)
+	}
+	return low
+}
+
+// nativeRefillMark is the fill, in frames, below which a live source may read
+// ahead of real time: 100 ms, or a smaller device's start threshold, so that a
+// device recovering from an underrun refills rather than waiting at its threshold.
+func nativeRefillMark(start, rate int) int {
+	mark := rate * 100 / 1000
+	if start > 0 {
+		mark = min(mark, start)
+	}
+	return mark
+}
+
 const (
-	// nativeStallLow is how little audio the device may hold, in milliseconds,
-	// with nothing decoded, before stall sound is written to cover the gap.
-	nativeStallLow = 100
 	// nativeStallChunk is how much stall sound is written at a time, in milliseconds.
 	nativeStallChunk = 50
 )
@@ -491,13 +511,14 @@ func (b *nativeBackend) output(ctx context.Context, s *session, chunks <-chan na
 	// fillStall covers a decoder or network stall with the looping stall sound, so
 	// the device neither runs dry nor goes quiet. It is local: not on RTP, not in
 	// the peaks that drive source arbitration, and not counted in the position.
+	stallRoom := 0 // frames of stall sound one write may add; set with the low-water mark
 	fillStall := func() error {
 		if len(stall) == 0 {
 			stall = stallSound(current.rate, current.channels)
 			stallAt = 0
 		}
 		frames := len(stall) / current.channels
-		n := min(current.rate*nativeStallChunk/1000, frames-stallAt)
+		n := min(current.rate*nativeStallChunk/1000, frames-stallAt, max(stallRoom, current.rate/200))
 		if err := out.Write(stall[stallAt*current.channels : (stallAt+n)*current.channels]); err != nil {
 			return err
 		}
@@ -540,7 +561,10 @@ func (b *nativeBackend) output(ctx context.Context, s *session, chunks <-chan na
 				return nativeChunk{}, false, nil
 			}
 		}
-		low := current.rate * nativeStallLow / 1000
+		// Below this much queued audio, with nothing decoded, stall sound covers the gap.
+		capacity := out.(interface{ BufferFrames() int }).BufferFrames()
+		low := nativeLowWater(capacity, current.rate)
+		stallRoom = capacity - low // a chunk bigger than the free space would block
 		for {
 			if ctx.Err() != nil {
 				return nativeChunk{}, false, nil
@@ -824,13 +848,19 @@ func nativeFormats(bits int, allowTruncate bool) []int {
 	return formats
 }
 
-// liveDeviceBufferMS is the -live-device-buffer-ms flag; 0 means OpenLowLatency.
-var liveDeviceBufferMS int
+// outputBufferMS overrides ALSA output capacity for every source; zero keeps
+// the automatic defaults for live audio and originals.
+var outputBufferMS int
+
+const outputBufferHelp = "ALSA output buffer for all sources in milliseconds, 40 to 10000; 0 negotiates 40 to 80 for LAN sources and 200 to 500 for originals"
+
+func validOutputBuffer(ms int) bool { return ms == 0 || ms >= 40 && ms <= 10000 }
 
 // allowOutputTruncate is opt-in and only adds a final S16 fallback.
 var allowOutputTruncate bool
 
 func openALSAOutput(device string, f format, live bool) (nativeOutput, error) {
+	ms := outputBufferMS
 	var errs []error
 	for _, candidate := range nativeFormats(f.bits, allowOutputTruncate) {
 		for _, channels := range []int{f.channels, 2} {
@@ -839,19 +869,21 @@ func openALSAOutput(device string, f format, live bool) (nativeOutput, error) {
 			}
 			var pcm *alsa.PCM
 			var err error
-			if live {
-				if ms := liveDeviceBufferMS; ms > 0 {
-					us := uint32(ms) * 1000
-					pcm, err = alsa.OpenBuffered(device, false, candidate, f.rate, channels, us, us, min(20_000, us/2), min(50_000, us/2))
-				} else {
-					pcm, err = alsa.OpenLowLatency(device, candidate, f.rate, channels)
-				}
+			if ms > 0 {
+				// A window, not an exact size: period multiples rarely land on the exact time.
+				us := uint32(ms) * 1000
+				pcm, err = alsa.OpenBuffered(device, false, candidate, f.rate, channels, us*4/5, us*5/4, min(20_000, us/4), min(50_000, us/2))
+			} else if live {
+				pcm, err = alsa.OpenLowLatency(device, candidate, f.rate, channels)
 			} else {
 				pcm, err = alsa.Open(device, false, candidate, f.rate, channels)
 			}
 			if err != nil {
 				errs = append(errs, err)
 				continue
+			}
+			if cfg := pcm.Config(); !cfg.Tuned {
+				slog.Warn("audio device rejected the preferred buffer; using its own", "bufferFrames", cfg.BufferFrames, "periodFrames", cfg.PeriodFrames, "rate", f.rate)
 			}
 			if candidate == alsa.FormatS16LE && f.bits > 16 {
 				slog.Warn("truncating audio output", "inputBits", f.bits, "outputBits", 16, "rate", f.rate)
@@ -912,8 +944,14 @@ func (a *alsaOutput) Format() localPCM {
 }
 
 func (a *alsaOutput) BufferFrames() int { return a.pcm.Config().BufferFrames }
-func (a *alsaOutput) Delay() int        { return a.pcm.Delay() }
-func (a *alsaOutput) Drain() error      { return a.pcm.Drain() }
+
+// StartFrames is the fill at which a stopped device starts: its buffer less one period.
+func (a *alsaOutput) StartFrames() int {
+	cfg := a.pcm.Config()
+	return cfg.BufferFrames - cfg.PeriodFrames
+}
+func (a *alsaOutput) Delay() int   { return a.pcm.Delay() }
+func (a *alsaOutput) Drain() error { return a.pcm.Drain() }
 func (a *alsaOutput) Close() {
 	a.pcm.Drop()
 	a.pcm.Close()

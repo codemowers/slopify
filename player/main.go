@@ -136,7 +136,7 @@ func main() {
 	flag.IntVar(&tuning.KeepAliveCount, "tcp-keepalive-count", 3, "unanswered TCP keepalive probes before dropping the connection; 0 for the system default")
 	readAheadMiB := flag.Int("read-ahead-mib", -1, "memory for downloading originals ahead of decoding, the current track to its end and then the next; -1 for half the memory limit (at most 1024), 0 to fetch only as decoding needs")
 	flag.BoolVar(&allowOutputTruncate, "allow-truncate", false, "ALSA: permit truncating to 16-bit output if no precision-preserving format works")
-	liveDeviceMS := flag.Int("live-device-buffer-ms", 0, "ALSA buffer for LAN sources in milliseconds, 40 to 2000; 0 lets the device choose within 40 to 80")
+	flag.IntVar(&outputBufferMS, "output-buffer-ms", 0, outputBufferHelp)
 	esoundBufferMS := flag.Int("esound-buffer-ms", esound.DefaultBufferMillis, "ESound stream buffer in milliseconds, 20 to 2000")
 	esoundSocketMS := flag.Int("esound-socket-ms", 0, "cap ESound's kernel receive queue, in milliseconds of audio; 0 leaves the system default, which adds delay")
 	raopListen := flag.String("raop-listen", "", "trusted-LAN AirPlay 1 (RAOP) receiver address, for example :5000; advertised over mDNS, no authentication")
@@ -213,11 +213,10 @@ func main() {
 		slog.Error("raop-listen requires local-source-control, and raop-buffer-ms must be 20 to 2000")
 		os.Exit(2)
 	}
-	if *pulseBufferMS < 0 || *pulseBufferMS > 2000 || *liveDeviceMS != 0 && (*liveDeviceMS < 40 || *liveDeviceMS > 2000) {
-		slog.Error("pulse-buffer-ms must be 0 to 2000 and live-device-buffer-ms 0 or 40 to 2000")
+	if *pulseBufferMS < 0 || *pulseBufferMS > 2000 || !validOutputBuffer(outputBufferMS) {
+		slog.Error("pulse-buffer-ms must be 0 to 2000, output-buffer-ms 0 or 40 to 10000")
 		os.Exit(2)
 	}
-	liveDeviceBufferMS = *liveDeviceMS
 	switch {
 	case *readAheadMiB < -1:
 		slog.Error("read-ahead-mib must be -1 (automatic), 0 (off) or a size in MiB")

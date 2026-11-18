@@ -47,6 +47,12 @@ device, start the player, and adopt it in the browser UI. For an installed servi
 see the [Linux installation guide](docs/linux-install.md). For a complete
 Pi image, see [Appliance](../appliance/README.md).
 
+`-output-buffer-ms` sets the ALSA output buffer for all sources, including
+standalone `play`, from 40 to 10000 ms (10 seconds). Zero keeps automatic defaults:
+40–80 ms for LAN sources and 200–500 ms for Slopify originals. Actual capacity
+depends on the sound card; larger buffers add playback delay. Input and download
+buffers are separate. OpenWrt exposes the setting in LuCI's General tab.
+
 The [player guide](docs/implementation.md) covers command-line options,
 receiver status, decoder choices, format guarantees and limitations. Hardware
 examples live under `appliance/docs/`: [Amp2 rotary](../appliance/docs/hifiberry-amp2/README.md) and

@@ -14,6 +14,7 @@ const (
 
 type Config struct {
 	Format, Rate, Channels, PeriodFrames, BufferFrames int
+	Tuned                                              bool
 }
 
 type PCM struct{}
@@ -29,13 +30,17 @@ var errUnavailable = errors.New("ALSA is available on Linux only")
 
 func Open(string, bool, int, int, int) (*PCM, error)     { return nil, errUnavailable }
 func OpenLowLatency(string, int, int, int) (*PCM, error) { return nil, errUnavailable }
-func (*PCM) Config() Config                              { return Config{} }
-func (*PCM) WriteFrames([]byte) (int, error)             { return 0, errUnavailable }
-func (*PCM) ReadFrames([]byte) (int, error)              { return 0, errUnavailable }
-func (*PCM) Delay() int                                  { return 0 }
-func (*PCM) Drain() error                                { return errUnavailable }
-func (*PCM) Drop() error                                 { return errUnavailable }
-func (*PCM) Close() error                                { return nil }
+func OpenBuffered(string, bool, int, int, int, uint32, uint32, uint32, uint32) (*PCM, error) {
+	return nil, errUnavailable
+}
+
+func (*PCM) Config() Config                  { return Config{} }
+func (*PCM) WriteFrames([]byte) (int, error) { return 0, errUnavailable }
+func (*PCM) ReadFrames([]byte) (int, error)  { return 0, errUnavailable }
+func (*PCM) Delay() int                      { return 0 }
+func (*PCM) Drain() error                    { return errUnavailable }
+func (*PCM) Drop() error                     { return errUnavailable }
+func (*PCM) Close() error                    { return nil }
 
 type Scale struct {
 	Min, Step int
