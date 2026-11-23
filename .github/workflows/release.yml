@@ -179,11 +179,61 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
           PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          REGISTRY: ${{ needs.prepare.outputs.registry }}
         run: |
-          cd release
+          cd release || exit 1
           sha256sum ./* > SHA256SUMS
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --verify-tag --draft --title "$TAG" --generate-notes
+          # Distinguish a missing release from authentication/network failures.
+          response="$RUNNER_TEMP/release-response"
+          if gh api --include "repos/$GH_REPO/releases/tags/$TAG" > "$response"; then
+            draft=$(gh release view "$TAG" --json isDraft --jq '.isDraft')
+          elif grep -Eq '^HTTP/[^ ]+ 404([[:space:]]|$)' "$response"; then
+            notes="$RUNNER_TEMP/release-notes.md"
+            # Markdown code spans/fences below deliberately use literal backticks.
+            # shellcheck disable=SC2016
+            {
+              printf '## Downloads\n\n'
+              printf 'Player binaries, Raspberry Pi OpenWrt images and manifests, the Helm chart, release values and checksums:\n\n'
+              for file in ./*; do
+                name="${file#./}"
+                printf -- '- [%s](https://github.com/%s/releases/download/%s/%s)\n' "$name" "$GH_REPO" "$TAG" "$name"
+              done
+              printf '\n## Container images\n\n'
+              printf 'Server images (Linux AMD64), pinned by digest:\n\n'
+              for service in indexer catalog streamer players frontend transcoder; do
+                image=$(sed -n "s/^  $service: //p" release-values.yaml)
+                [[ "$image" =~ ^ghcr.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]]
+                printf -- '- `%s`\n' "$image"
+              done
+              printf '\n## Helm chart\n\n'
+              printf '```sh\nhelm install slopify oci://%s/charts/slopify --version %s\n```\n' "$REGISTRY" "$VERSION"
+            } > "$notes"
+            gh release create "$TAG" --verify-tag --draft --title "$TAG" --generate-notes --notes-file "$notes" --prerelease="$PRERELEASE"
+            draft=true
+          else
+            echo 'Could not look up the release; refusing to publish.' >&2
+            exit 1
           fi
-          gh release upload "$TAG" ./* --clobber
-          gh release edit "$TAG" --draft=false --prerelease="$PRERELEASE"
+          gh release view "$TAG" --json assets --jq '.assets[].name' > "$RUNNER_TEMP/release-assets"
+          existing="$RUNNER_TEMP/existing-release-assets"
+          mkdir -p "$existing"
+          # Validate every existing attachment before uploading anything.
+          for file in ./*; do
+            name="${file#./}"
+            if grep -Fxq "$name" "$RUNNER_TEMP/release-assets"; then
+              gh release download "$TAG" --pattern "$name" --dir "$existing"
+              if ! cmp -s "$file" "$existing/$name"; then
+                printf 'Published asset differs: %s; use a new release tag.\n' "$name" >&2
+                exit 1
+              fi
+            fi
+          done
+          for file in ./*; do
+            if ! grep -Fxq "${file#./}" "$RUNNER_TEMP/release-assets"; then
+              gh release upload "$TAG" "$file"
+            fi
+          done
+          if [[ "$draft" == true ]]; then
+            gh release edit "$TAG" --draft=false --prerelease="$PRERELEASE"
+          fi

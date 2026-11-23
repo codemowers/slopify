@@ -470,7 +470,11 @@ the build action's digest outputs directly, copying only chart metadata,
 default values and templates, never private installation values. The OCI chart
 is `oci://ghcr.io/<owner>/charts/slopify`; GitHub Release assets include its
 archive, release values, players, Pi images/manifests and SHA256SUMS. Publish the
-GitHub Release only after every build succeeds. Release CI compiles Go
+GitHub Release only after every build succeeds. Notes list all downloads,
+digest-pinned server images and the OCI Helm install command. Never clobber
+release attachments: compare existing files before any upload, resume missing
+uploads only and fail on differences, requiring a new tag. Preserve existing
+release notes on reruns. Release CI compiles Go
 on the runner and invokes the official `openwrt/imagebuilder` Docker images;
 never run the experimental source/SDK kernel workflow there. Pi profiles share
 `profiles/rpi-common.sh` and use bcm2710/bcm2711/bcm2712 with their own upstream

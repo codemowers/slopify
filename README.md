@@ -38,6 +38,8 @@ UI stays focused on volume, mute, playback and input selection.
 
 Version tags publish a GitHub Release with player binaries, Pi images, checksums
 and a Helm chart. Server images and the digest-pinned chart are published to GHCR.
+Release notes list the downloads, server image digests and Helm install command.
+Reruns upload missing attachments only; differing attachments require a new tag.
 Pushes to `main` build and package these artifacts without publishing them.
 
 ## Documentation
