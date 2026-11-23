@@ -84,36 +84,39 @@ func NewInstance() string {
 // SenderConfig describes the sender.
 type SenderConfig struct {
 	// Control carries bounded application topology on the existing RTCP group.
-	Control   func() ([]byte, uint64)
-	OnControl func([]byte, netip.Addr, time.Time)
-	Name      string
-	Group     netip.AddrPort
-	Interface *net.Interface
-	Instance  string
+	Control          func() ([]byte, uint64)
+	OnControl        func([]byte, netip.Addr, time.Time)
+	Name             string
+	Group            netip.AddrPort
+	Interface        *net.Interface
+	Instance         string
+	LocalDelayMillis int
 }
 
 // SenderStatus is what the speaker page shows.
 type SenderStatus struct {
-	Receivers   []ReceiverStatus `json:"receivers"`
-	ReportError string           `json:"reportError,omitempty"`
-	Name        string           `json:"name"`
-	Group       string           `json:"group"`
-	Encoding    string           `json:"encoding,omitempty"`
-	Rate        int              `json:"rate,omitempty"`
-	Channels    int              `json:"channels,omitempty"`
-	Sending     bool             `json:"sending"`
-	QueueMS     int              `json:"queueMs"`
-	QueueMaxMS  int              `json:"queueMaxMs"`
-	Packets     uint64           `json:"packets"`
-	Bytes       uint64           `json:"bytes"`
-	Discards    uint64           `json:"discards"`
-	Errors      uint64           `json:"errors"`
-	Error       string           `json:"error,omitempty"`
+	LocalDelayMS int              `json:"localDelayMs"`
+	Receivers    []ReceiverStatus `json:"receivers"`
+	ReportError  string           `json:"reportError,omitempty"`
+	Name         string           `json:"name"`
+	Group        string           `json:"group"`
+	Encoding     string           `json:"encoding,omitempty"`
+	Rate         int              `json:"rate,omitempty"`
+	Channels     int              `json:"channels,omitempty"`
+	Sending      bool             `json:"sending"`
+	QueueMS      int              `json:"queueMs"`
+	QueueMaxMS   int              `json:"queueMaxMs"`
+	Packets      uint64           `json:"packets"`
+	Bytes        uint64           `json:"bytes"`
+	Discards     uint64           `json:"discards"`
+	Errors       uint64           `json:"errors"`
+	Error        string           `json:"error,omitempty"`
 }
 
 type senderItem struct {
 	begin *senderBegin
 	audio []byte
+	at    time.Time
 }
 
 type senderBegin struct {
@@ -245,6 +248,12 @@ func (s *Sender) Begin(format Format, track Track) {
 
 // Write queues left-justified samples without blocking.
 func (s *Sender) Write(samples []int32) {
+	s.WriteAt(samples, time.Time{})
+}
+
+// WriteAt queues audio on a best-effort transmission timeline. A zero time
+// preserves the sender's ordinary continuous pacing.
+func (s *Sender) WriteAt(samples []int32, at time.Time) {
 	s.mu.Lock()
 	width := s.width
 	if s.muted || s.sourceBlocked {
@@ -270,7 +279,7 @@ func (s *Sender) Write(samples []int32) {
 		s.mu.Unlock()
 		return
 	}
-	s.items = append(s.items, senderItem{audio: audio})
+	s.items = append(s.items, senderItem{audio: audio, at: at})
 	s.queued += len(audio)
 	for i := 0; s.queued > s.maxBytes && i < len(s.items); {
 		if s.items[i].begin != nil {
@@ -324,6 +333,9 @@ func (s *Sender) enabled() bool {
 	return !s.muted && !s.sourceBlocked
 }
 
+// Enabled reports whether demand and source eligibility allow transmission.
+func (s *Sender) Enabled() bool { return s.enabled() }
+
 // Flush forgets queued audio, when local playback stops or seeks.
 func (s *Sender) Flush() {
 	s.mu.Lock()
@@ -357,6 +369,7 @@ func (s *Sender) Status() SenderStatus {
 	defer s.mu.Unlock()
 	status := SenderStatus{Name: s.config.Name, Group: s.config.Group.String(), Encoding: s.encoding, Rate: s.active.format.Rate, Channels: s.active.format.Channels,
 		Sending: !s.muted && !s.sourceBlocked && time.Since(s.lastSend) < time.Second, Packets: s.packets.Load(), Bytes: s.bytes.Load(), Discards: s.discards.Load(), Errors: s.errors.Load(), Error: s.lastErr}
+	status.LocalDelayMS = s.config.LocalDelayMillis
 	if s.maxBytes > 0 {
 		status.QueueMaxMS = senderQueueMillis
 		status.QueueMS = s.queued * senderQueueMillis / s.maxBytes
@@ -396,6 +409,9 @@ func (s *Sender) run(ctx context.Context) {
 		if item.begin != nil {
 			s.apply(*item.begin)
 			continue
+		}
+		if !item.at.IsZero() {
+			s.next = item.at
 		}
 		s.sendAudio(ctx, item.audio)
 	}

@@ -200,6 +200,16 @@ The LAN-source output default is 40–80 ms (Slopify originals keep 200–500 ms
 rewinding and resending, heard as looping, so a live stream is never read faster than real
 time, and the start threshold stays below the target minus `minReq`.
 
+**Best-effort multicast alignment.** `-rtp-local-delay-ms` holds the transmitting
+speaker's local queue audio back by an additional 200 ms by default (0–2000 ms;
+zero disables). It does not enlarge ALSA buffers or delay received LAN sources.
+The sender and delayed local copy use a common monotonic timeline, re-anchored
+at track boundaries and after interruptions. Receivers retain their configurable
+200 ms input default and track-marker correction. Device latency remains
+additional; independent DAC clocks can drift between boundaries. No samples
+are modified to chase synchronization. This is approximate alignment, not
+scheduled playback against a synchronized clock on all speakers.
+
 **Discovery.** The player publishes its receivers through Avahi's D-Bus API: `_pulse-sink._tcp`
 as `name via PulseAudio`, IPv4-only when the receiver binds an IPv4 address, and
 `_raop._tcp` as `HWADDR@name via AirPlay` with a hardware ID derived from the host

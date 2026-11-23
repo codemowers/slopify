@@ -137,6 +137,9 @@ Playback position reports acknowledge progress; they do not request seeking.
 An explicit seek has its own event identity, entry and target position and is
 applied once, even when repeated snapshots carry it. Delayed server updates at
 a gapless track boundary therefore do not rewind an already playing track.
+The session also retains its newest eight heard track completions: a delayed
+snapshot still naming a completed entry does not restart it while the queue
+command remains unchanged. Explicit transport commands and seek events apply.
 
 Pulse timing replies include output-device delay so a sender can compensate
 video timing. The stream's read/write indices already describe its input queue.
@@ -148,11 +151,26 @@ with `-output-buffer-ms` (40–10000 ms). Standalone `play` uses the same flag.
 Zero negotiates the respective default; explicit values request approximately
 that capacity (within −20%/+25%). A device that cannot meet the request falls
 back to its supported capacity and logs a warning. OpenWrt exposes
-`output_buffer_ms` in General.
+`output_buffer_ms` in Sinks.
 The actual queued delay varies with fill level. Larger buffers add playback
 delay as well as scheduling margin. The decoded queue and download budget
 remain separate. Larger LAN output buffers may exceed a PipeWire tunnel's
 latency budget. A/V support remains experimental.
+
+Multicast sending adds `-rtp-local-delay-ms` before local queue playback:
+200 ms by default, 0–2000 ms, zero to disable. OpenWrt uses `rtp_local_delay_ms`
+in Sinks; the speaker page displays it in Multicast stream details.
+This is an additional software delay, separate from ALSA capacity and device
+latency. Tune it against receiver input/output delays. Using the same explicit
+`-output-buffer-ms` on sender and receivers removes their differing automatic
+output defaults from this comparison. Transmission and the local
+copy share a best-effort timeline, re-anchored at track boundaries and after
+interruptions. RTP markers allow receivers to trim accumulated input excess.
+No resampling or sample insertion/removal corrects drift between boundaries.
+The delay queue holds at most 256 short PCM blocks (16 MiB upper bound),
+separately from the existing 32-block decoder queue. Disabling multicast demand
+or selecting a LAN source bypasses new delay scheduling; already queued local
+audio stays intact. Stop and seek cancel outstanding timing waits.
 
 The native engine downloads the current original to its end in the background, and only
 then starts on the next track, so a congested uplink drains a whole track of slack rather

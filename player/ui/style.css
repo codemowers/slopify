@@ -35,7 +35,7 @@ select:disabled,input:disabled{opacity:.45;cursor:not-allowed}
 .sender-setup p{color:var(--muted);font-size:14px}
 .sender-setup h3{margin-top:24px}
 
-.project-footer{display:flex;justify-content:center;padding:0 14px max(20px,env(safe-area-inset-bottom))}.project-footer a{display:inline-flex;align-items:center;gap:8px;min-height:44px;color:var(--muted);text-decoration:none}.project-footer a:hover{color:var(--text);text-decoration:underline}
+.project-footer{display:flex;flex-direction:column;align-items:center;gap:4px;justify-content:center;padding:0 14px max(20px,env(safe-area-inset-bottom))}.project-footer a{display:inline-flex;align-items:center;gap:8px;min-height:44px;color:var(--muted);text-decoration:none}.project-footer a:hover{color:var(--text);text-decoration:underline}
 #sources.fixed>label,#sources.fixed>select,#sources.fixed>p.muted,#sources.fixed>#sound-guard,#sources.fixed .source-lock{display:none}
 .source-buffer{display:grid;grid-template-columns:auto 1fr auto;gap:2px 8px;align-items:center;font-size:.8em;margin:4px 0}.source-buffer[hidden]{display:none}.source-buffer meter{width:100%;height:8px}.source-underflows{grid-column:1/-1;color:#e8a33d}
 

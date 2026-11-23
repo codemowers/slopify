@@ -209,6 +209,17 @@ func audioGauge(name, help string) *prometheus.GaugeVec {
 }
 
 func init() {
+	build := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "slopify_player_build_info",
+		Help: "Player build metadata; timestamps are UTC RFC3339, unknown when unavailable. Value is always 1.",
+		ConstLabels: prometheus.Labels{
+			"version": playerBuild.Version, "revision": playerBuild.Revision,
+			"modified": playerBuild.Modified, "build_time": playerBuild.BuildTime,
+			"commit_time": playerBuild.CommitTime, "go_version": playerBuild.GoVersion,
+		},
+	})
+	build.Set(1)
+	nativeMetricsRegistry.MustRegister(build)
 	nativeMetricsRegistry.MustRegister(metricBuffer, metricWriteTime, metricReceiveGap, metricLoopGap, metricFetch, metricStartup,
 		metricUnderruns, metricOverflows, metricErrors, metricStreamEvents, metricLostFrames, metricClipped, metricOpens, metricBytes, metricPackets,
 		metricBufferBytes, metricBufferLimitBytes, metricSelectionChanges, metricSelected, metricRate,

@@ -26,7 +26,10 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Build static player
-        run: go build -trimpath -ldflags='-s -w' -o "dist/slopify-player-$TARGET" ./player
+        run: |
+          build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          build_version=$(git describe --tags --always --dirty)
+          go build -trimpath -ldflags="-s -w -X main.buildTime=$build_time -X main.buildVersion=$build_version" -o "dist/slopify-player-$TARGET" ./player
         env:
           TARGET: ${{ matrix.name }}
           CGO_ENABLED: "0"

@@ -4,7 +4,7 @@
 /skaffold.env
 /chart/values-local.yaml
 /chart/values-demo.yaml
-/docker-compose.yaml
+/player/compose.yaml
 /server/deploy/raspi/local/
 
 /dist/
@@ -20,7 +20,7 @@
 /.build-tmp/
 
 # Local Compose media paths and signing key
-/.env
+/server/.env
 
 # Private demo settings are never release inputs.
 /chart/values-demo.example.yaml

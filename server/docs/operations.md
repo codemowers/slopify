@@ -156,8 +156,10 @@ cannot be retrieved later—save it or generate a replacement.
 
 [compose.yaml](../compose.yaml) is a local-machine example using Linux host
 networking and anonymous access to one shared queue. Set `XDG_MUSIC_DIR`,
-`XDG_VIDEOS_DIR` and `STREAM_SIGNING_KEY` in a private `.env`, then run
-`docker compose --env-file .env -f server/compose.yaml up -d --build`. Media directories must already
+`XDG_VIDEOS_DIR` and `STREAM_SIGNING_KEY` in private `server/.env`, then run
+`docker compose up -d --build` from `server/`. Compose automatically loads that
+directory's `.env`. Generate a signing key with `openssl rand -hex 32`.
+Media directories must already
 exist; only the indexer mounts them writable. The example listens on port 8080
 and is intended for a trusted network. Keep its player state separate from
 OIDC deployments.

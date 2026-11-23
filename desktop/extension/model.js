@@ -34,6 +34,20 @@ export function volumeFraction(v) {
     return v?.muted ? 0 : Math.max(0, Math.min(1, ((v?.level ?? 0) - (v?.min ?? 0)) / Math.max(1, (v?.max ?? 100) - (v?.min ?? 0))));
 }
 
+// Adjacent perceptual levels can map to the same hardware gain. In that case
+// sending level - 1 can round straight back to the current level forever.
+export function volumeStep(v, direction) {
+    const current = v.steps?.find(step => step.level === v.level);
+    let level = v.level;
+    while (level + direction >= v.min && level + direction <= v.max) {
+        level += direction;
+        const step = v.steps?.find(step => step.level === level);
+        if (!Number.isFinite(current?.db) || !Number.isFinite(step?.db) ||
+            step.db !== current.db || !!step.muted !== !!current.muted) return level;
+    }
+    return level;
+}
+
 // Soup omits default ports from Host; Origin must use the same spelling.
 export function controlOrigin(origin) {
     return origin.replace(/^(http:\/\/[^/]+):80$/, '$1').replace(/^(https:\/\/[^/]+):443$/, '$1');

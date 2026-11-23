@@ -10,6 +10,7 @@ other GNOME versions still need testing.
 - Show track information, transport controls, hardware volume and mute.
 - Select a speaker input or return to automatic input selection.
 - Control the chosen speaker with media keys and GNOME's volume OSD.
+- Volume keys skip duplicate hardware gain steps so adjustment cannot stall.
 - Expose an MPRIS endpoint for desktop integration.
 
 The remote is a compact controller. Use the browser UI for catalog browsing,

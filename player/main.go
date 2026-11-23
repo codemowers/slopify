@@ -148,6 +148,7 @@ func main() {
 	rtpInterface := flag.String("rtp-interface", "", "network interface for rtp-receive and rtp-send; empty lets the system choose")
 	rtpSend := flag.Bool("rtp-send", false, "multicast Slopify audio over RTP, announced over SAP with track titles in clear text; no authentication or encryption")
 	rtpSendGroup := flag.String("rtp-send-group", "", "multicast ADDRESS or ADDRESS:PORT for rtp-send; empty picks a random one at each start")
+	rtpLocalDelayMS := flag.Int("rtp-local-delay-ms", 200, "additional local playback delay while multicasting, in milliseconds, 0 to 2000; 0 disables; best-effort speaker alignment, separate from device latency")
 	rtpBufferMS := flag.Int("rtp-buffer-ms", rtp.DefaultBufferMillis, "RTP stream delay in milliseconds, 20 to 1000; it holds twice this to absorb clock drift")
 	upnpListen := flag.String("upnp-listen", "", "trusted-LAN UPnP media renderer HTTP address, for example 192.0.2.10:49494; also answers SSDP on UDP 1900; no authentication")
 	localListen := flag.String("local-listen", "", "optional trusted-LAN status, hardware volume and setup web UI listen address")
@@ -264,6 +265,10 @@ func main() {
 		rtpConfig = &rtp.Config{BufferMillis: *rtpBufferMS, Interface: rtpInterfaceConfig, Instance: rtpInstance}
 	}
 	var rtpGroup netip.AddrPort
+	if *rtpLocalDelayMS < 0 || *rtpLocalDelayMS > 2000 {
+		slog.Error("rtp-local-delay-ms must be 0 to 2000")
+		os.Exit(2)
+	}
 	if *rtpSend || *queueShare {
 		var err error
 		if *rtpSendGroup != "" {
@@ -397,8 +402,9 @@ func main() {
 	}
 
 	if *rtpSend || *queueShare {
-		c.rtpSender = rtp.NewSender(rtp.SenderConfig{Name: name, Group: rtpGroup, Interface: rtpInterfaceConfig, Instance: rtpInstance, Control: c.link.controlPacket, OnControl: c.link.receiveControl})
+		c.rtpSender = rtp.NewSender(rtp.SenderConfig{Name: name, Group: rtpGroup, Interface: rtpInterfaceConfig, Instance: rtpInstance, Control: c.link.controlPacket, OnControl: c.link.receiveControl, LocalDelayMillis: *rtpLocalDelayMS})
 		backend.sender = c.rtpSender
+		backend.multicastLocalDelay = time.Duration(*rtpLocalDelayMS) * time.Millisecond
 		if c.sources != nil {
 			c.rtpSender.SetSourceEligible(false)
 		}
@@ -701,6 +707,16 @@ func (c *controller) reconcile(s *state) {
 	versionChanged := c.desired == nil || s.Version != c.applied
 	seekChanged := s.Seek != nil && s.Seek.ID != "" && s.Seek.Entry == s.Current &&
 		(c.desired == nil || c.desired.Seek == nil || c.desired.Seek.ID != s.Seek.ID)
+	// A progress snapshot can still name a track that this gapless session
+	// already finished. Only its actual completion marker permits ignoring
+	// that snapshot; explicit commands and seeks must still take effect.
+	completedSnapshot := false
+	if c.sess != nil && !c.sess.finished() && !seekChanged && c.desired != nil &&
+		c.desired.State == "playing" && s.QueueCommand != "" && s.QueueCommand == c.desired.QueueCommand {
+		if completed, ok := c.sess.(interface{ completed(uint64) bool }); ok {
+			completedSnapshot = completed.completed(s.Current)
+		}
+	}
 	startPosition := s.Position
 	if seekChanged {
 		startPosition = s.Seek.Position
@@ -748,7 +764,7 @@ func (c *controller) reconcile(s *state) {
 		}
 		return
 	}
-	if following {
+	if following || completedSnapshot {
 		return
 	}
 	if c.sess != nil && c.sess.finished() && c.sess.failure() && c.sess.current() == e.ID && !versionChanged {

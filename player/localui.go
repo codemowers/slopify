@@ -186,6 +186,7 @@ func (c *controller) localSnapshot(history ...*outputHistoryCursor) any {
 		multicast = &status
 	}
 	return struct {
+		Build        playerBuildInfo     `json:"build"`
 		Pulse        bool                `json:"pulseEnabled"`
 		RTP          bool                `json:"rtpEnabled"`
 		AirPlay      bool                `json:"airplayEnabled"`
@@ -210,7 +211,7 @@ func (c *controller) localSnapshot(history ...*outputHistoryCursor) any {
 		Error        string              `json:"error,omitempty"`
 		Sources      any                 `json:"sourceControl,omitempty"`
 		Multicast    *rtp.SenderStatus   `json:"multicast,omitempty"`
-	}{c.localPulse, c.localRTP, c.localAirPlay, c.raopEncrypted.Load(), c.localEsoundPort, l.siblings.Snapshot(), c.localSettingsURL, c.link.snapshot(), c.localSettingsPort, serverOrigin, serverHost, l.playback, time.Now(), c.name, l.hardware, hostname, httpx.EnvOr("SLOPIFY_PULSE_SINK", "slopify.hifiberry"), l.output, l.device, nodes, vol, l.err, c.sourceSnapshot(history...), multicast}
+	}{playerBuild, c.localPulse, c.localRTP, c.localAirPlay, c.raopEncrypted.Load(), c.localEsoundPort, l.siblings.Snapshot(), c.localSettingsURL, c.link.snapshot(), c.localSettingsPort, serverOrigin, serverHost, l.playback, time.Now(), c.name, l.hardware, hostname, httpx.EnvOr("SLOPIFY_PULSE_SINK", "slopify.hifiberry"), l.output, l.device, nodes, vol, l.err, c.sourceSnapshot(history...), multicast}
 }
 func (c *controller) localEvents(w http.ResponseWriter, r *http.Request) {
 	rc := http.NewResponseController(w)

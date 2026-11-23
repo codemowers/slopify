@@ -6,7 +6,9 @@ RUN go mod download
 COPY internal/httpx/ ./internal/httpx/
 COPY internal/volume/ ./internal/volume/
 COPY player/ ./player/
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/app ./player
+ARG PLAYER_VERSION=dev
+ARG PLAYER_REVISION
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X main.buildVersion=${PLAYER_VERSION} -X main.buildRevision=${PLAYER_REVISION}" -o /out/app ./player
 
 FROM scratch
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt

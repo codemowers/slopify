@@ -358,7 +358,10 @@ func TestNativeReadAheadPreparesNextAfterCurrentDownloaded(t *testing.T) {
 	s := b.Start(1, 0)
 	for ended := 0; ended < 2; {
 		select {
-		case <-events:
+		case event := <-events:
+			if !s.(*session).completed(event.entry) {
+				t.Fatal("track completion was reported before the session latched it")
+			}
 			ended++
 		case <-time.After(10 * time.Second):
 			t.Fatal("playback did not finish")

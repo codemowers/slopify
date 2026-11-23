@@ -39,6 +39,10 @@ are gitignored. The `demo` profile has separate private demo values.
 
 [compose.yaml](compose.yaml) is a trusted-LAN local-machine example. Its usage and
 required environment variables are in the [deployment guide](docs/operations.md).
+Put private settings in `server/.env` and run `docker compose up --build` from
+`server/`; Compose loads the settings automatically.
+Its nginx configuration is mounted from `server/deploy/compose/nginx.conf`;
+relative bind paths resolve from the Compose file's directory.
 
 See [architecture and implementation notes](docs/operations.md) and
 [repository guidance](../AGENTS.md) for service responsibilities and API behavior.

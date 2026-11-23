@@ -34,6 +34,8 @@ config player 'player'
 	option rtp '0'
 	# Multicast Slopify audio over RTP, with track titles in clear text. No authentication.
 	option rtp_send '0'
+	# Additional local playback delay while multicasting, 0 to 2000 ms. Zero disables.
+	option rtp_local_delay_ms '200'
 	option queue_share '0'
 	# ADDRESS or ADDRESS:PORT (default port 5004). Generated once and saved at boot.
 	option rtp_send_group ''

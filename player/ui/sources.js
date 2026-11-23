@@ -281,6 +281,7 @@ function renderMulticast(sender) {
  }
 
  set('multicast-group',sender.group);
+ set('multicast-local-delay',`Additional local playback delay while multicasting: ${sender.localDelayMs||0} ms · best-effort alignment; device latency is additional`);
  set('multicast-format',sender.encoding?`${sender.channels}ch · ${sender.rate/1000}kHz · ${sender.encoding} · ${sender.sending?'sending':'idle'}`:'Waits for Slopify playback');
  set('multicast-counters',`${sender.packets} packets · ${(sender.bytes/1048576).toFixed(1)} MiB · ${sender.discards} discarded · ${sender.errors} errors`);
  const error=document.getElementById('multicast-error');

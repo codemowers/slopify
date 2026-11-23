@@ -67,13 +67,32 @@ func (q *queueView) after(id uint64) (uint64, bool) {
 
 // session plays one track and the ones after it, gaplessly.
 type session struct {
-	failed    atomic.Bool
-	startedAt time.Time
-	cancel    context.CancelFunc
-	done      chan struct{}
-	first     uint64
-	cur       atomic.Uint64
-	pos       atomic.Uint64 // float64 bits: seconds into the current track
+	failed           atomic.Bool
+	startedAt        time.Time
+	cancel           context.CancelFunc
+	done             chan struct{}
+	first            uint64
+	cur              atomic.Uint64
+	pos              atomic.Uint64 // float64 bits: seconds into the current track
+	completedEntries [8]atomic.Uint64
+	completedCursor  uint64 // Written only by the output goroutine.
+}
+
+func (s *session) noteCompleted(id uint64) {
+	s.completedEntries[s.completedCursor%uint64(len(s.completedEntries))].Store(id)
+	s.completedCursor++
+}
+
+func (s *session) completed(id uint64) bool {
+	if id == 0 {
+		return false
+	}
+	for i := range s.completedEntries {
+		if s.completedEntries[i].Load() == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *session) current() uint64 {

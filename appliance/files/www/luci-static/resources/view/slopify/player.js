@@ -47,10 +47,12 @@ return view.extend({
 		var s = m.section(form.NamedSection, 'player', 'player');
 		s.addremove = false;
 		s.tab('general', _('General'));
+		s.tab('sources', _('Sources'), _('Configure Slopify queue playback and local queue sharing. Incoming LAN audio protocols are configured in Receivers.'));
+		s.tab('sinks', _('Sinks'), _('Configure local audio output and multicast transmission to other speakers.'));
+		s.tab('receivers', _('Receivers'), _('Enable incoming LAN audio protocols and configure their input buffers.'));
 		s.tab('volume', _('Volume control'));
 		s.tab('rotary', _('Rotary'), _('Select a relative-axis rotary encoder for volume. Its push button uses the standard media key configured in the GPIO overlay.'));
 		s.tab('ir', irAvailable ? _('IR receive') : _('IR receive (unavailable)'), _('Receive handheld remote buttons and map them to standard Linux multimedia keys for Slopify. This does not transmit commands to an amplifier.'));
-		s.tab('receivers', _('Receivers'));
 		var o;
 
   o = s.taboption('general', form.DummyValue, '_media_inputs', _('Media keys'));
@@ -79,7 +81,7 @@ return view.extend({
 			o.placeholder = system.hostname;
 		}
 
-		o = s.taboption('general', form.Value, 'server', _('Slopify server'), _('Empty plays LAN sources only.'));
+		o = s.taboption('sources', form.Value, 'server', _('Slopify server'), _('Empty plays LAN sources only.'));
 		o.placeholder = 'https://slopify.example.com';
 		o.validate = function(section, value) {
 			if (value != '' && !/^https?:\/\/[^\s'\\]+$/.test(value))
@@ -89,22 +91,22 @@ return view.extend({
 			return true;
 		};
 
-		o = s.taboption('general', form.ListValue, 'card', _('Sound card'));
+		o = s.taboption('sinks', form.ListValue, 'card', _('Sound card'));
 		o.value('auto', audio.auto ? _('Automatic (%s)').format(audio.auto) : _('Automatic'));
 		audio.cards.forEach(function(c) { o.value(c.id, c.name ? '%s (%s)'.format(c.name, c.id) : c.id); });
 
-		o = s.taboption('general', form.Value, 'output_buffer_ms', _('Output buffer'), _('ALSA kernel buffer capacity for all sources, in milliseconds, 40 to 10000 (10 seconds). Empty negotiates 40 to 80 for LAN sources and 200 to 500 for Slopify originals. Larger buffers add scheduling margin and playback delay. Input and download buffers are separate. The sound card may negotiate a different capacity.'));
+		o = s.taboption('sinks', form.Value, 'output_buffer_ms', _('Output buffer'), _('ALSA kernel buffer capacity for all sources, in milliseconds, 40 to 10000 (10 seconds). Empty negotiates 40 to 80 for LAN sources and 200 to 500 for Slopify originals. Larger buffers add scheduling margin and playback delay. Input and download buffers are separate. The sound card may negotiate a different capacity.'));
 		o.datatype = 'range(40,10000)';
 		o.placeholder = 'auto';
 
-		o = s.taboption('general', form.Flag, 'allow_truncate', _('Allow 16-bit fallback'),
+		o = s.taboption('sinks', form.Flag, 'allow_truncate', _('Allow 16-bit fallback'),
 			_('If no output format preserves the input precision, permit discarding low bits to play at 16 bits. Sample rate stays unchanged. Disabled by default.'));
 		o.default = '0';
 		o.rmempty = false;
 
 		var hat = data[2];
 		if (hat.available) {
-			o = s.taboption('general', form.ListValue, '_hat_overlay', _('Audio HAT overlay'),
+			o = s.taboption('sinks', form.ListValue, '_hat_overlay', _('Audio HAT overlay'),
 				_('Auto lets Raspberry Pi firmware select the HAT from its EEPROM. Off disables HAT overlays; USB and onboard audio remain available. Save, then reboot to apply.'));
 			o.value('off', _('Off'));
 			var detected = hat.eeprom ? hat.product + (hat.active ? ' — ' + hat.active : '') : _('no EEPROM detected');
@@ -121,7 +123,7 @@ return view.extend({
 				});
 			};
 			if (hat.error) {
-				o = s.taboption('general', form.DummyValue, '_hat_error', _('HAT configuration'));
+				o = s.taboption('sinks', form.DummyValue, '_hat_error', _('HAT configuration'));
 				o.renderWidget = function() { return E('p', { 'class': 'alert-message warning' }, hat.error); };
 			}
 		}
@@ -165,7 +167,7 @@ return view.extend({
   o.renderWidget = function() {
    return E('p', { role: 'note' }, irAvailable
     ? _('Kernel IR support and ir-keytable are present. Enable a receiver overlay and reboot before selecting it below. Select the protocol, Save & Apply, Learn each button, then Save & Apply again. Volume and mute need amplifier volume control configured in the Volume control tab.')
-    : _('IR input is unavailable on this image. Official Image Builder release images do not include the required kernel IR support. Adding a GPIO overlay or installing ir-keytable alone cannot enable it. A separately built kernel with matching RC-core, LIRC, GPIO IR and protocol decoders, plus ir-keytable, is required. RECS80 and Denon also need built-in RC-core and BPF LIRC decoding. For HiFiBerry Amp4, select hifiberry-dacplus-std in General; wire a suitable receiver to a free GPIO (the documented setup uses BCM26 / pin 37), enable gpio-ir,gpio_pin=26 in /boot/config.txt, and reboot. Then select the receiver and protocol here, Save & Apply, Learn each button and Save & Apply again. Configure amplifier volume in Volume control. See appliance/README.md for the full setup.'));
+    : _('IR input is unavailable on this image. Official Image Builder release images do not include the required kernel IR support. Adding a GPIO overlay or installing ir-keytable alone cannot enable it. A separately built kernel with matching RC-core, LIRC, GPIO IR and protocol decoders, plus ir-keytable, is required. RECS80 and Denon also need built-in RC-core and BPF LIRC decoding. For HiFiBerry Amp4, select hifiberry-dacplus-std in Sinks; wire a suitable receiver to a free GPIO (the documented setup uses BCM26 / pin 37), enable gpio-ir,gpio_pin=26 in /boot/config.txt, and reboot. Then select the receiver and protocol here, Save & Apply, Learn each button and Save & Apply again. Configure amplifier volume in Volume control. See appliance/README.md for the full setup.'));
   };
   var receivers = data[3] || [];
   o = s.taboption('ir', form.ListValue, 'ir_receiver', _('Remote receiver'), _('Select a receiver and protocol, then Save & Apply once. Use Learn beside each action below, then Save & Apply the bindings. A learning press is temporarily isolated from playback controls. GPIO overlays must be enabled first.'));
@@ -278,7 +280,7 @@ return view.extend({
 		o.depends('raop', '1');
 		o = s.taboption('receivers', form.Flag, 'rtp', _('Multicast RTP receiver'), _('Receives uncompressed PCM (L16/L24) audio. Sessions announced over SAP on UDP 9875. No authentication.'));
 		o.rmempty = false;
-		o = s.taboption('receivers', form.Flag, 'rtp_send', _('Multicast RTP sender'), _('Sends selected, locally decoded Slopify audio as uncompressed PCM (L16/L24) and track titles to the LAN. Incoming LAN sources disable transmission and advertisement. No encryption.'));
+		o = s.taboption('sinks', form.Flag, 'rtp_send', _('Multicast RTP sender'), _('Sends selected, locally decoded Slopify audio as uncompressed PCM (L16/L24) and track titles to the LAN. Incoming LAN sources disable transmission and advertisement. No encryption.'));
 		o.rmempty = false;
 		[
 			['pulse_buffer_ms', 'Pulse input buffer (ms)', '0', 'range(0,2000)', 'pulse', 'Minimum stream buffer, 0–2000 ms. 0 honours the sender. PipeWire tunnels may tick above about 100 ms.'],
@@ -294,10 +296,16 @@ return view.extend({
 			o.retain = true;
 		});
 
-		o = s.taboption('receivers', form.Flag, 'queue_share', _('Share queue audio locally'), _('Players on the same queue elect a multicast sender. Followers reuse its audio and fall back to direct playback when it disappears. Requires RTP reception.'));
+		o = s.taboption('sources', form.Flag, 'queue_share', _('Share queue audio locally'), _('Players on the same queue elect a multicast sender. Followers reuse its audio and fall back to direct playback when it disappears. Enable Multicast RTP receiver in Receivers first.'));
 		o.depends('rtp', '1');
 		o.rmempty = false;
-		o = s.taboption('receivers', form.Value, 'rtp_send_group', _('Multicast sender group'), _('Generated once and saved. IPv4 multicast address, optionally with a port (default 5004).'));
+		o = s.taboption('sinks', form.Value, 'rtp_local_delay_ms', _('Local playback delay while multicasting (ms)'), _('Additional delay before local output, 0–2000 ms; default 200. Zero disables. Tune to match receiver input and output delays. Best-effort alignment resets at track boundaries and after interruptions; device clocks can drift. Does not change ALSA capacity or incoming LAN audio.'));
+		o.placeholder = '200';
+		o.datatype = 'range(0,2000)';
+		o.depends('rtp_send', '1');
+		o.depends('queue_share', '1');
+		o.retain = true;
+		o = s.taboption('sinks', form.Value, 'rtp_send_group', _('Multicast sender group'), _('Generated once and saved. IPv4 multicast address, optionally with a port (default 5004).'));
 		o.depends('rtp_send', '1');
 		o.depends('queue_share', '1');
 		o.rmempty = false;

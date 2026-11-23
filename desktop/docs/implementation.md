@@ -24,7 +24,9 @@ Stop pauses it. Seeking is not exposed.
 
 Choosing a speaker redirects volume/media keys to it. Volume changes show the
 native GNOME OSD with speaker name and hardware dB. MPRIS/slider volume 0–1 maps to
-the speaker's configured bounds; zero uses hardware mute when available. A speaker
+the speaker's configured bounds; zero uses hardware mute when available. Volume
+keys skip adjacent levels with the same reported hardware gain, avoiding
+rounding back to the current level (including at the configured maximum). A speaker
 without a playback mute switch can only reduce to its minimum configured level.
 GNOME's separate laptop volume slider is untouched. Selecting Laptop controls or
 disabling the extension restores shortcuts; an offline speaker is never replaced

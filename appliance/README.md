@@ -32,6 +32,11 @@ Images are written to `dist/openwrt/`. Set your server in LuCI after boot and
 adopt the speaker in the browser UI. Images contain no Wi-Fi credentials or
 installation-specific server settings by default.
 
+LuCI separates Slopify server and queue sharing settings in Sources, local sound
+card/HAT and multicast output settings in Sinks, and incoming LAN audio protocols
+and their input buffers in Receivers. Speaker identity, the web UI and monitoring
+remain in General; hardware volume and physical controls have their own tabs.
+
 ## Physical controls
 
 Release Image Builder kernels do not support GPIO IR reception. LuCI disables

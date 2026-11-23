@@ -1,7 +1,7 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Soup from 'gi://Soup?version=3.0';
-import {privateIPv4, canTransport, transportActions, controlOrigin} from './model.js';
+import {privateIPv4, canTransport, transportActions, controlOrigin, volumeStep} from './model.js';
 
 const config = `${GLib.get_user_config_dir()}/slopify-remote`;
 export function readJSON(name, fallback = {}) {
@@ -155,7 +155,7 @@ export class Client {
                     if (action === 'mute') body = {muted: !v.muted};
                     else if (action === 'volume' && value === 0 && v.muteAvailable) body = {muted: true};
                     else body = {level: Math.max(v.min, Math.min(v.max, action === 'volume' ?
-                        Math.round(v.min + value * (v.max - v.min)) : v.level + (action === 'volume-up' ? 1 : -1)))};
+                        Math.round(v.min + value * (v.max - v.min)) : volumeStep(v, action === 'volume-up' ? 1 : -1)))};
                     let volume = await this.request(origin, '/api/volume', body);
                     if (!current()) return;
                     if (v.switchMuted && (action === 'volume-up' || action === 'volume' && value > 0))

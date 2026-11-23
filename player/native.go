@@ -54,7 +54,8 @@ type nativeBackend struct {
 	openLive func(format) (nativeOutput, error)
 	client   *http.Client
 	// sender is the opt-in multicast copy of what this backend decodes.
-	sender *rtp.Sender
+	sender              *rtp.Sender
+	multicastLocalDelay time.Duration
 	// readAhead bounds originals downloaded ahead of decoding; nil disables it.
 	readAhead *readAheadBudget
 
@@ -167,15 +168,20 @@ var slopifyRateOwner atomic.Pointer[session]
 
 // nativeChunk is decoded audio, a track boundary or a decode failure.
 type nativeChunk struct {
-	input   *sourceInput
-	entry   uint64
-	begin   *format
-	codec   string
-	lossy   bool
-	start   float64
-	end     bool
-	failure error
-	samples []int32
+	// mirrored chunks were already copied to multicast by the delay feeder.
+	mirrored  bool
+	localCopy bool
+	feedAck   chan struct{}
+	localAt   time.Time
+	input     *sourceInput
+	entry     uint64
+	begin     *format
+	codec     string
+	lossy     bool
+	start     float64
+	end       bool
+	failure   error
+	samples   []int32
 }
 
 var nativeBuffers = sync.Pool{New: func() any { s := make([]int32, nativeChunkSamples); return &s }}
@@ -439,6 +445,7 @@ const (
 )
 
 func (b *nativeBackend) output(ctx context.Context, s *session, chunks <-chan nativeChunk, seekCue, announce bool) {
+	stopFeed := func() {}
 	var pending []nativeChunk
 	if announce {
 		pending = waitStartupAudio(ctx, chunks, b.StartSound, time.Second)
@@ -454,6 +461,7 @@ func (b *nativeBackend) output(ctx context.Context, s *session, chunks <-chan na
 	var stall []int32 // one loop period, for current
 	var stallAt int   // next frame of it to play
 	defer func() {
+		stopFeed()
 		if slopifyRateOwner.CompareAndSwap(s, nil) { // Not if a newer session set it.
 			if metricsEnabled {
 				metricRate.DeleteLabelValues(audio(stageInput, "slopify")...)
@@ -507,6 +515,10 @@ func (b *nativeBackend) output(ctx context.Context, s *session, chunks <-chan na
 			out, current = opened, f
 			written = uint64(len(seekSound(f.rate, f.channels)) / f.channels)
 		}
+	}
+	if b.sender != nil && b.multicastLocalDelay > 0 {
+		chunks, stopFeed = b.multicastFeed(ctx, chunks, pending)
+		pending = nil
 	}
 	// fillStall covers a decoder or network stall with the looping stall sound, so
 	// the device neither runs dry nor goes quiet. It is local: not on RTP, not in
@@ -605,6 +617,9 @@ func (b *nativeBackend) output(ctx context.Context, s *session, chunks <-chan na
 		if !ok || ctx.Err() != nil {
 			break
 		}
+		if !waitMulticastTime(ctx, c.localAt) {
+			break
+		}
 		switch {
 		case c.failure != nil:
 			fail(c.failure)
@@ -648,7 +663,7 @@ func (b *nativeBackend) output(ctx context.Context, s *session, chunks <-chan na
 			if metricsEnabled {
 				metricRate.WithLabelValues(audio(stageInput, "slopify")...).Set(float64(c.begin.rate))
 			}
-			if b.sender != nil {
+			if b.sender != nil && !c.mirrored {
 				e := b.queue.entry(c.entry)
 				b.sender.Begin(rtp.Format{Rate: c.begin.rate, Channels: c.begin.channels, Bits: c.begin.bits}, rtp.Track{Title: e.Title, Artist: e.Artist, Album: e.Album})
 			}
@@ -672,8 +687,10 @@ func (b *nativeBackend) output(ctx context.Context, s *session, chunks <-chan na
 					metricBuffer.WithLabelValues(audio(stageInput, "slopify")...).Observe(float64(queued) / 1000)
 				}
 			}
-			b.queuedSamples.Add(-int64(len(c.samples)))
-			if b.sender != nil {
+			if !c.localCopy {
+				b.queuedSamples.Add(-int64(len(c.samples)))
+			}
+			if b.sender != nil && !c.mirrored {
 				b.sender.Write(c.samples)
 			}
 			writeAt := time.Now()
@@ -681,6 +698,9 @@ func (b *nativeBackend) output(ctx context.Context, s *session, chunks <-chan na
 				errorAt(stageOutput, "slopify", "write")
 				fail(err)
 				return
+			}
+			if c.feedAck != nil {
+				close(c.feedAck)
 			}
 			if metricsEnabled {
 				metricWriteTime.WithLabelValues(audio(stageOutput, "slopify")...).Observe(time.Since(writeAt).Seconds())
@@ -692,8 +712,10 @@ func (b *nativeBackend) output(ctx context.Context, s *session, chunks <-chan na
 			}
 			written += uint64(len(c.samples) / current.channels)
 			peaks.add(c.samples, current, time.Duration(out.Delay())*time.Second/time.Duration(current.rate), time.Now())
-			buffer := c.samples[:cap(c.samples)]
-			nativeBuffers.Put(&buffer)
+			if !c.localCopy {
+				buffer := c.samples[:cap(c.samples)]
+				nativeBuffers.Put(&buffer)
+			}
 			if !report() {
 				return
 			}
@@ -729,6 +751,9 @@ func (b *nativeBackend) applyMark(ctx context.Context, s *session, m nativeMark,
 	// The track resumes after the stall sound; until then its position holds.
 	*trackStart += m.gap
 	if m.ended != 0 {
+		// Latch heard completion before the controller can receive an older
+		// server snapshot while this session advances to the next track.
+		s.noteCompleted(m.ended)
 		select {
 		case b.events <- event{ended: true, entry: m.ended, session: s}:
 		case <-ctx.Done():

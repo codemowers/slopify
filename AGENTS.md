@@ -272,6 +272,13 @@ block. Reports use RTP port + 1, randomized 2.5–7.5 second intervals, SR/RR pl
 SDES CNAME/NAME. Source IP and report-block SSRC isolate senders sharing a group.
 Names are untrusted text; cap inventory at 32, expire after 90 seconds and never
 send inventory to cloud APIs. Packet reception does not establish audible playback.
+`-rtp-local-delay-ms` adds 0–2000 ms before local queue playback while multicast
+transmission is enabled (default 200, zero disables); OpenWrt exposes
+`rtp_local_delay_ms` and the local multicast details show the configured value.
+A bounded, separately queued local copy follows the sender timeline in short writes;
+the decoder queue remains 32 blocks. Re-anchor at track boundaries and after
+interruptions, with RTP markers allowing receiver correction. This is best-effort,
+adds to device latency, and never resamples or edits samples for clock drift.
 Control IO runs outside audio callbacks and retries failures without stopping audio.
 Do not connect a LAN source to these receivers: multicast currently copies only Slopify queue playback. SAP carries title/artist/album in clear text; never add paths, URLs or internal entry IDs.
 The local multicast sender offers `/multicast.sdp`, an SDP snapshot of its current
@@ -306,8 +313,10 @@ minus one period), so a shallow buffer is never permanently "short" and a
 device recovering from an underrun refills instead of waiting at its threshold.
 `-output-buffer-ms` overrides ALSA output capacity for all sources, including
 standalone file playback (40–10000 ms). Zero keeps the respective automatic
-defaults. OpenWrt exposes `output_buffer_ms` in the General tab. Input and download
-buffers remain separate; do not add per-protocol output knobs.
+defaults. OpenWrt exposes `output_buffer_ms` in the Sinks tab. Input and download
+buffers remain separate; do not add per-protocol output knobs. LuCI separates
+Slopify server/queue sharing (Sources), ALSA/HAT and multicast transmission
+(Sinks), and incoming LAN protocols with their input buffers (Receivers).
 The local Pulse card's `syncOffsetMs` is receiver-ring plus device delay, not
 measured lip-sync error or sender/network latency. Render changing input bitrate
 and A/V offset after the fixed PCM/state text in that row.
@@ -328,6 +337,10 @@ Each card shows its own "Buffer" at its bottom. `-metrics` defaults off on MIPS
 and on elsewhere; disabling it skips instrumentation, TCP sampling/wrappers and
 the `/metrics` handler. OpenWrt UCI `metrics` is empty for automatic, `0`/`1` for an
 override. Keep source meters, buffering status, arbitration and damage logs active.
+Player build metadata is cached at startup from `runtime/debug.ReadBuildInfo`
+plus linker `buildVersion`, `buildTime` and optional `buildRevision` values.
+`slopify_player_build_info` and local status/footer share it. Keep build time
+separate from commit time; unavailable values are unknown, never startup time.
 Speaker `/metrics` (`native_metrics.go`)
 labels audio series `stage` (download/input/output), `transport` (https/http for queue
 originals, multicast, pulse, airplay, esound, upnp, cue) and `source`: the SLOPIFY_SERVER
@@ -591,10 +604,16 @@ Profile names include bitrate where applicable and are bound by URL signatures.
   Use separate player state from OIDC installations. `compose.yaml` is the local
   Linux host-network anonymous stack, public `[::]:8080` (dual stack), backend
   loopback ports 18081–18088 and metrics 19090. It is a local-machine example,
-  configured directly through private `.env` values; there is no Go launcher.
+  configured directly through private `server/.env` values; run Compose from
+  `server/` so it loads that file automatically. There is no Go launcher.
   Only indexer
   mounts those media directories writable. The existing private
-  `docker-compose.yaml` remains the separate speaker setup.
+  `player/compose.yaml` is the private separate speaker setup; run it from
+  `player/`. Keep both private files gitignored and out of the repository root.
+  Compose bind paths resolve relative to `server/compose.yaml`, so its nginx
+  mount uses `./deploy/compose/nginx.conf`; disable automatic host-path creation
+  to fail on missing configuration files. The private player setup builds
+  with `player/Dockerfile` and the repository root as its context.
   Frontend owns authorization-code/PKCE login and renewal. Refresh tokens stay
   in an encrypted HttpOnly session cookie; access tokens live in browser memory.
 - Catalog and players independently verify bearer access tokens: issuer,
@@ -635,6 +654,9 @@ its target, independently of report revisions and extrapolated position. Copy
 the event with playback state; progress reports must neither recreate nor
 change it. Clear it when starting another entry. Preserve gapless sessions
 through delayed track acknowledgments; no version/position drift heuristic.
+A session latches the newest eight heard completion IDs before reporting them.
+Snapshots naming those completed entries cannot rewind an active session while
+the queue command is unchanged; explicit commands and seek events still apply.
 
 - One durable logical user queue per OIDC subject; browsers and Linux
   devices are replaceable outputs. The queue follows the account across tabs
@@ -1075,6 +1097,8 @@ The native GNOME Shell extension in `desktop/` uses GJS, Avahi D-Bus
 and MPRIS, with no Python service or build step. Its dropdown contains metadata,
 hardware volume slider, transport and source/player selection; native OSD names
 the speaker and dB. Media keys are captured only in desktop/overview modes, with
+volume keys skipping adjacent levels with identical hardware gain to avoid
+quantization stalls. Key handling uses
 persisted backup and restore on disable or Laptop controls. Local
 `GET/POST /api/playback` exposes bounded queue metadata and version/entry-checked
 transport through the controller owner, retaining same-origin JSON checks and

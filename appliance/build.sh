@@ -8,14 +8,18 @@ set -eu
 umask 022
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 out="${OUT:-$repo/dist/openwrt}"
+build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+build_version=$(git -C "$repo" describe --tags --always --dirty 2>/dev/null || echo dev)
 [ $# -gt 0 ] || set -- rpi-3 rpi-4 rpi-5
 for profile in "$@"; do
 	SLOPIFY_OPENWRT="$repo/appliance"
+	# Profiles are selected at runtime from the appliance/profiles directory.
+	# shellcheck disable=SC1090
 	. "$SLOPIFY_OPENWRT/profiles/$profile.sh"
 	bin="$out/.player-$profile"
 	mkdir -p "$out/$profile" "$bin"
 	(cd "$repo" && CGO_ENABLED=0 GOOS=linux GOARCH="$SLOPIFY_GOARCH" GOARM="${SLOPIFY_GOARM:-}" GOMIPS="${SLOPIFY_GOMIPS:-softfloat}" \
-		go build -tags "${PLAYER_BUILD_TAGS:-}" -trimpath -ldflags='-s -w' -o "$bin/slopify-player" ./player
+		go build -tags "${PLAYER_BUILD_TAGS:-}" -trimpath -ldflags="-s -w -X main.buildTime=$build_time -X main.buildVersion=$build_version" -o "$bin/slopify-player" ./player
 	CGO_ENABLED=0 GOOS=linux GOARCH="$SLOPIFY_GOARCH" GOARM="${SLOPIFY_GOARM:-}" GOMIPS="${SLOPIFY_GOMIPS:-softfloat}" go build -trimpath -ldflags='-s -w' -o "$bin/slopify-ir" ./player/tools/ir)
 	# The container runs as its own unprivileged user.
 	chmod a+rwx "$out/$profile"

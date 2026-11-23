@@ -132,6 +132,14 @@ function connectSpeakerEvents() {
  stream.onmessage = event => renderSpeakerState(status.apply(JSON.parse(event.data)));
 }
 function renderSpeakerState(state) {
+ const build = state.build;
+ const info = $("build-info");
+ info.hidden = !build;
+ if (build) {
+  info.textContent = `Player ${build.version} · ${build.revision.slice(0,12)}${build.modified === "true" ? " (modified)" : ""}`;
+  info.title = `Commit: ${build.revision}\nCommit time: ${build.commitTime}\nBuilt: ${build.buildTime}\nGo: ${build.goVersion}`;
+ }
+
  $("hardware-description").textContent=state.hardware || "";
  $("hardware-description").hidden=!state.hardware;
  renderSiblings(state.siblings || []);
