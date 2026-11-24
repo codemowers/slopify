@@ -109,6 +109,23 @@ const (
 	channelFrontR   = 2
 )
 
+// FormatName gives a supported format's protocol name, as used in mDNS records.
+func FormatName(format int) string {
+	switch format {
+	case FormatS16LE:
+		return "s16le"
+	case FormatS24LE:
+		return "s24le"
+	case FormatS32LE:
+		return "s32le"
+	case FormatS2432LE:
+		return "s24-32le"
+	case FormatFloat32LE:
+		return "float32le"
+	}
+	return ""
+}
+
 // BytesPerSample returns a supported format's sample size, or zero.
 func BytesPerSample(format int) int {
 	switch format {
@@ -126,6 +143,9 @@ func BytesPerSample(format int) int {
 type Config struct {
 	Name, Description string
 	Rate              int
+	// Format is the sink's sample format, which tunnels copy for their streams.
+	// Advertise the widest one the output plays losslessly; 0 means S32LE.
+	Format int
 	// MinBufferMillis raises what senders ask for; 0 honours them. A PipeWire tunnel
 	// aims for 200 ms in total, and starves itself into ticks if this exceeds that.
 	MinBufferMillis int
@@ -149,6 +169,9 @@ type Server struct {
 func NewServer(config Config) *Server {
 	if config.Rate == 0 {
 		config.Rate = 48000
+	}
+	if BytesPerSample(config.Format) == 0 || config.Format == FormatFloat32LE {
+		config.Format = FormatS32LE
 	}
 	return &Server{config: config, clients: map[*client]struct{}{}}
 }
@@ -559,7 +582,7 @@ func (c *client) serverInfo(tag uint32) *writer {
 	config := c.server.config
 	w := c.reply(tag)
 	w.str("Slopify").str("16.0").str("slopify").str("slopify")
-	w.sampleSpec(FormatS32LE, 2, uint32(config.Rate))
+	w.sampleSpec(uint8(config.Format), 2, uint32(config.Rate))
 	w.str(config.Name).null().u32(uint32(c.index))
 	return w.channelMap([]byte{channelFrontL, channelFrontR})
 }
@@ -567,7 +590,7 @@ func (c *client) serverInfo(tag uint32) *writer {
 func (c *client) sinkInfo(w *writer) *writer {
 	config := c.server.config
 	w.u32(sinkIndex).str(config.Name).str(config.Description)
-	w.sampleSpec(FormatS32LE, 2, uint32(config.Rate))
+	w.sampleSpec(uint8(config.Format), 2, uint32(config.Rate))
 	w.channelMap([]byte{channelFrontL, channelFrontR})
 	w.u32(invalidIndex).cvolume(2, volumeNorm).boolean(false)
 	w.u32(invalidIndex).null() // No monitor source: this server cannot record.

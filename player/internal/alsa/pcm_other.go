@@ -34,6 +34,8 @@ func OpenBuffered(string, bool, int, int, int, uint32, uint32, uint32, uint32) (
 	return nil, errUnavailable
 }
 
+func Formats(string) ([]int, error) { return nil, errUnavailable }
+
 func (*PCM) Config() Config                  { return Config{} }
 func (*PCM) WriteFrames([]byte) (int, error) { return 0, errUnavailable }
 func (*PCM) ReadFrames([]byte) (int, error)  { return 0, errUnavailable }
