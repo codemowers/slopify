@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {privateIPv4, canTransport, playingInfo, volumeFraction, controlOrigin, volumeText, sourceLabel, volumeStep} from './extension/model.js';
+import {privateIPv4, canTransport, playingInfo, volumeFraction, controlOrigin, volumeText, sourceLabel, volumeStep, outputPeer} from './extension/model.js';
 assert(privateIPv4('10.0.0.2')); assert(privateIPv4('192.168.1.2'));
 for (const address of ['127.0.0.1', '8.8.8.8', '239.1.1.1', '10.999.0.1']) assert(!privateIPv4(address));
 assert(!canTransport({sourceControl: {selected: 'lan_2'}}, {available: true}));
@@ -34,3 +34,16 @@ assert.equal(sourceLabel({id: 'lan_4', protocol: 'rtp', name: 'lauri-t14s · 239
 assert.equal(sourceLabel({id: 'lan_1', protocol: 'pulse', name: 'lauri-t14s', host: 'lauri-t14s'}), 'PulseAudio from lauri-t14s');
 assert.equal(sourceLabel({id: 'lan_6', protocol: 'esound', name: 'WinESD'}), 'ESound from WinESD');
 assert.equal(sourceLabel({id: 'lan_8', protocol: 'airplay', name: 'iPhone'}), 'AirPlay from iPhone');
+
+const peers = [{id: 'amp', host: 'amp.local', ip: '10.0.0.2'},
+    {id: 'dac', host: 'dac.local', ip: '10.0.0.3'}];
+assert.equal(outputPeer({name: 'tunnel.amp.local.slopify.output'}, peers), 'amp');
+assert.equal(outputPeer({name: 'raop_sink.dac.local.10.0.0.3.5000'}, peers), 'dac');
+assert.equal(outputPeer({name: 'custom', description: 'Amp via PulseAudio on  [10.0.0.2]:4713'}, peers), 'amp');
+assert.equal(outputPeer({name: 'tunnel.10.0.0.3.slopify.output'}, peers), 'dac');
+assert.equal(outputPeer({name: 'alsa_output.local', description: 'Amp'}, peers), '');
+assert.equal(outputPeer({name: 'tunnel.amp.local.evil.slopify.output'}, []), '');
+assert.equal(outputPeer({name: 'tunnel.amp.local.slopify.output'}, [...peers, {...peers[0], id: 'duplicate'}]), '');
+assert.equal(outputPeer({name: 'tunnel.amp.local.slopify.output', description: 'Other via PulseAudio on  [10.0.0.3]:4713'}, peers), '');
+assert.equal(outputPeer(null, peers), '');
+assert.equal(outputPeer({name: 'tunnel.10.0.0.20.output'}, peers), '');

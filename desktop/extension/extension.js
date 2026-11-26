@@ -6,6 +6,7 @@ import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
+import * as Volume from 'resource:///org/gnome/shell/ui/status/volume.js';
 import {Slider} from 'resource:///org/gnome/shell/ui/slider.js';
 import {Client} from './client.js';
 import {Keys} from './keys.js';
@@ -67,6 +68,14 @@ export default class Slopify extends Extension {
         this.button.menu.addAction('Use laptop controls', () => this.client.select(''));
         this.keys = new Keys(action => this.client.command(action));
         this.client = new Client(() => this.render(), volume => this.showVolume(volume));
+        this.mixer = Volume.getMixerControl();
+        const syncOutput = () => {
+            const sink = this.mixer.get_default_sink();
+            this.client.setOutput(sink ? {name: sink.get_name(), description: sink.get_description()} : null);
+        };
+        this.mixerSignals = ['default-sink-changed', 'state-changed', 'stream-changed', 'stream-added', 'stream-removed']
+            .map(signal => this.mixer.connect(signal, syncOutput));
+        syncOutput();
         this.mpris = new Mpris(this.client, () => this.button.menu.toggle());
         Main.panel.addToStatusArea(this.uuid, this.button);
         this.render();
@@ -100,15 +109,17 @@ export default class Slopify extends Extension {
         this.mute.child.icon_name = v?.muted ? 'audio-volume-muted-symbolic' : 'audio-volume-high-symbolic';
         this.open.setSensitive(!!c.peer);
         const peers = [...c.peers.values()].sort((a, b) => a.name.localeCompare(b.name));
-        const peerKey = JSON.stringify([c.selected, peers.map(p => [p.id, p.name])]);
+        const peerKey = JSON.stringify([c.followOutput, c.selected, peers.map(p => [p.id, p.name])]);
         if (peerKey !== this.peerKey) {
             this.peerKey = peerKey; this.players.menu.removeAll();
+            const follow = this.players.menu.addAction('Follow system audio output', () => c.follow());
+            follow.setOrnament(c.followOutput ? PopupMenu.Ornament.DOT : PopupMenu.Ornament.NONE);
             for (const p of [{id: '', name: 'Laptop controls'}, ...peers]) {
                 const item = this.players.menu.addAction(p.name, () => c.select(p.id));
-                item.setOrnament(p.id === c.selected ? PopupMenu.Ornament.DOT : PopupMenu.Ornament.NONE);
+                item.setOrnament(!c.followOutput && p.id === c.selected ? PopupMenu.Ornament.DOT : PopupMenu.Ornament.NONE);
             }
         }
-        this.players.label.text = `Player: ${c.peer?.name || (c.selected ? 'Offline' : 'Laptop')}`;
+        this.players.label.text = `${c.followOutput ? 'Following output' : 'Player'}: ${c.peer?.name || (c.selected ? 'Offline' : 'Laptop')}`;
         const policy = c.status.sourceControl;
         const sources = policy?.sources?.filter(s => !s.senderUnavailable || s.id === policy.selected) || [];
         const sourceKey = JSON.stringify([policy?.selected, policy?.mode, sources.map(s => [s.id, sourceLabel(s), s.connected])]);
@@ -126,6 +137,8 @@ export default class Slopify extends Extension {
     disable() {
         if (this.volumeTimer) GLib.source_remove(this.volumeTimer);
         this.volumeTimer = 0;
+        for (const signal of this.mixerSignals || []) this.mixer.disconnect(signal);
+        this.mixerSignals = []; this.mixer = null;
         this.client?.destroy(); this.mpris?.destroy(); this.keys?.destroy(); this.button?.destroy();
         this.client = this.mpris = this.keys = this.button = null;
         this.peerKey = this.sourceKey = null;

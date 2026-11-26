@@ -1,7 +1,7 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Soup from 'gi://Soup?version=3.0';
-import {privateIPv4, canTransport, transportActions, controlOrigin, volumeStep} from './model.js';
+import {privateIPv4, canTransport, transportActions, controlOrigin, volumeStep, outputPeer} from './model.js';
 
 const config = `${GLib.get_user_config_dir()}/slopify-remote`;
 export function readJSON(name, fallback = {}) {
@@ -21,7 +21,10 @@ export function call(bus, path, iface, method, args, cancellable = null) {
 export class Client {
     constructor(changed, osd) {
         this.changed = changed; this.osd = osd;
-        this.selected = readJSON('settings').selected || '';
+        const settings = readJSON('settings');
+        this.followOutput = settings.followOutput !== false;
+        this.selected = this.followOutput ? '' : settings.selected || '';
+        this.output = null;
         this.peers = new Map(); this.services = new Map(); this.pending = [];
         this.status = {}; this.transport = {}; this.error = ''; this.generation = 0;
         this.cancel = new Gio.Cancellable();
@@ -64,7 +67,7 @@ export class Client {
                     if (this.dead || epoch !== this.discoveryEpoch || this.services.get(key) !== ticket) return;
                     const host = result[5].replace(/\.$/, '').toLowerCase(), ip = result[7], port = result[8];
                     if (!privateIPv4(ip) || !/^[a-z0-9][a-z0-9.-]*\.local$/.test(host)) return;
-                    this.services.set(key, {id: `${name}.${domain}`, name, origin: controlOrigin(`http://${ip}:${port}`),
+                    this.services.set(key, {id: `${name}.${domain}`, name, host, ip, origin: controlOrigin(`http://${ip}:${port}`),
                         url: `http://${host}${port === 80 ? '' : `:${port}`}/`});
                     this.refreshPeers();
                 }).catch(() => {});
@@ -91,11 +94,32 @@ export class Client {
         if (this.dead) return;
         const previous = this.peer?.origin;
         this.peers = new Map([...this.services.values()].filter(p => p.id).map(p => [p.id, p]));
+        if (this.followOutput) this.setTarget(outputPeer(this.output, this.peers.values()));
         if (previous !== this.peer?.origin) this.resetTarget();
         this.changed(); this.pump();
     }
     resetTarget() { this.generation++; this.pending = []; this.status = {}; this.transport = {}; this.error = ''; this.failures = 0; }
-    select(id) { this.selected = id; writeJSON('settings', {selected: id}); this.resetTarget(); this.changed(); this.pump(); }
+    setTarget(id) {
+        if (id === this.selected) return;
+        this.selected = id; this.resetTarget();
+    }
+    select(id) {
+        this.followOutput = false;
+        this.setTarget(id);
+        writeJSON('settings', {selected: id, followOutput: false});
+        this.changed(); this.pump();
+    }
+    follow() {
+        this.followOutput = true;
+        writeJSON('settings', {followOutput: true});
+        this.setOutput(this.output);
+    }
+    setOutput(output) {
+        this.output = output;
+        if (!this.followOutput) return;
+        this.setTarget(outputPeer(output, this.peers.values()));
+        this.changed(); this.pump();
+    }
     async request(origin, path, body) {
         origin = controlOrigin(origin);
         const message = Soup.Message.new(body === undefined ? 'GET' : 'POST', origin + path);

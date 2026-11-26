@@ -1103,7 +1103,12 @@ hardware volume slider, transport and source/player selection; native OSD names
 the speaker and dB. Media keys are captured only in desktop/overview modes, with
 volume keys skipping adjacent levels with identical hardware gain to avoid
 quantization stalls. Key handling uses
-persisted backup and restore on disable or Laptop controls. Local
+persisted backup and restore on disable or Laptop controls. By default it follows
+GNOME's default PulseAudio/PipeWire sink through Shell's shared Gvc mixer. Match
+only discovered speaker hosts/IPs in tunnel/AirPlay output identities; unmatched
+or ambiguous outputs restore laptop keys. Manual player selection overrides
+following until Follow system audio output is selected. Never derive control
+URLs from sink text or change audio routing/source pins while following. Local
 `GET/POST /api/playback` exposes bounded queue metadata and version/entry-checked
 transport through the controller owner, retaining same-origin JSON checks and
 device-scoped cloud authorization without retries. See [the extension guide](desktop/README.md).

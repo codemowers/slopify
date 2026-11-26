@@ -52,3 +52,17 @@ export function volumeStep(v, direction) {
 export function controlOrigin(origin) {
     return origin.replace(/^(http:\/\/[^/]+):80$/, '$1').replace(/^(https:\/\/[^/]+):443$/, '$1');
 }
+
+// Resolve only against discovered control endpoints; sink text never supplies a URL.
+export function outputPeer(output, peers) {
+    if (!output) return '';
+    const name = (output.name || '').toLowerCase();
+    const description = output.description || '';
+    if (!name.startsWith('tunnel.') && !name.startsWith('raop_sink.') &&
+        !description.includes(' via PulseAudio')) return '';
+    const matches = [...peers].filter(peer =>
+        (peer.host && (name.startsWith(`tunnel.${peer.host}.`) || name.startsWith(`raop_sink.${peer.host}.`))) ||
+        (peer.ip && (description.includes(`[${peer.ip}]:`) || name.startsWith(`tunnel.${peer.ip}.`)))
+    );
+    return matches.length === 1 ? matches[0].id : '';
+}

@@ -22,6 +22,16 @@ selection releases the pin. Transport controls are disabled unless Slopify is th
 selected input. Queue commands affect its shared queue, including other outputs;
 Stop pauses it. Seeking is not exposed.
 
+By default the companion follows GNOME's default PulseAudio/PipeWire sink using
+Shell's shared Gvc mixer and its output-change signals. Discovered speaker hostnames
+match Pulse tunnel/AirPlay sink names; numeric tunnel names and PulseAudio tunnel
+descriptions also match discovered IPs. Ambiguous or unmatched outputs release keys
+to the laptop. Discovery changes re-evaluate the current output. Sink text never
+supplies control URLs. This follows the default output, not per-application routing,
+and does not change the speaker's selected input or the desktop's audio routing.
+Manual player/Laptop controls selection overrides following; Follow system audio
+output restores it. The mode is persisted, with following enabled by default.
+
 Choosing a speaker redirects volume/media keys to it. Volume changes show the
 native GNOME OSD with speaker name and hardware dB. MPRIS/slider volume 0–1 maps to
 the speaker's configured bounds; zero uses hardware mute when available. Volume
